@@ -326,7 +326,7 @@ def main():
     # Get available stimulus types
     stim_df = session.stimulus_presentations
     stim_types = stim_df["stimulus_name"].unique()
-    print(f"Available stimulus types: {stim_types[:5]}...")  # Show first 5
+    print(f"Available stimulus types: {list(stim_types[:5])}...")  # Show first 5
     
     # Try to extract trials for a common stimulus type
     test_stimulus = None

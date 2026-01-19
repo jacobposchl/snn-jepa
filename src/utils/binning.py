@@ -26,68 +26,30 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 
-def _get_units_df(session, spike_times_dict: dict) -> pd.DataFrame:
+def _get_units_df(session) -> pd.DataFrame:
     """
-    Get units DataFrame from session, handling different Allen SDK APIs.
+    Get units DataFrame from Allen SDK BehaviorEcephysSession.
     
     Args:
-        session: Allen SDK session object
-        spike_times_dict: Dict of spike times (fallback for unit IDs)
+        session: Allen SDK BehaviorEcephysSession object
         
     Returns:
         DataFrame with unit metadata, indexed by unit_id
     """
-    # Try different ways to access units
-    units_df = None
-    
-    # Method 1: Direct attribute (some session types)
-    if hasattr(session, 'units') and session.units is not None:
-        try:
-            units_df = session.units.copy()
-        except Exception:
-            pass
-    
-    # Method 2: get_units() method
-    if units_df is None and hasattr(session, 'get_units'):
-        try:
-            units_df = session.get_units().copy()
-        except Exception:
-            pass
-    
-    # Method 3: Create minimal DataFrame from spike_times keys
-    if units_df is None:
-        unit_ids = list(spike_times_dict.keys())
-        units_df = pd.DataFrame(index=unit_ids)
-        units_df.index.name = 'unit_id'
-    
-    return units_df
+    return session.get_units().copy()
 
 
 def _get_stimulus_presentations(session) -> pd.DataFrame:
     """
-    Get stimulus presentations DataFrame, handling different Allen SDK APIs.
+    Get stimulus presentations DataFrame from Allen SDK BehaviorEcephysSession.
     
     Args:
-        session: Allen SDK session object
+        session: Allen SDK BehaviorEcephysSession object
         
     Returns:
         DataFrame with stimulus presentation info
     """
-    # Try different ways to access stimulus presentations
-    if hasattr(session, 'stimulus_presentations'):
-        try:
-            return session.stimulus_presentations.copy()
-        except Exception:
-            pass
-    
-    if hasattr(session, 'get_stimulus_presentations'):
-        try:
-            return session.get_stimulus_presentations().copy()
-        except Exception:
-            pass
-    
-    # Return empty DataFrame if not available
-    return pd.DataFrame()
+    return session.stimulus_presentations.copy()
 
 
 def get_time_bins(
@@ -192,27 +154,27 @@ def bin_session(
     """
     # Get spike times and units table
     spike_times_dict = session.spike_times
-    units_df = session.units.copy()
+    units_df = _get_units_df(session)
     
     # Apply filters to select units
     if unit_ids is not None:
         # Use explicitly provided unit IDs
         selected_ids = [uid for uid in unit_ids if uid in spike_times_dict]
     else:
-        # Apply area filter
-        if area_filter is not None:
+        # Apply area filter (only if column exists)
+        if area_filter is not None and "ecephys_structure_acronym" in units_df.columns:
             if isinstance(area_filter, str):
                 area_filter = [area_filter]
             units_df = units_df[units_df["ecephys_structure_acronym"].isin(area_filter)]
         
-        # Apply quality filter
+        # Apply quality filter (only if relevant columns exist)
         if quality_filter == "good":
-            # Filter for good units based on common quality metrics
             if "quality" in units_df.columns:
                 units_df = units_df[units_df["quality"] == "good"]
             elif "isi_violations" in units_df.columns:
                 # Fallback: use ISI violations < 0.5 as quality proxy
                 units_df = units_df[units_df["isi_violations"] < 0.5]
+            # If no quality columns, keep all units
         
         selected_ids = list(units_df.index)
     
@@ -286,7 +248,10 @@ def extract_trials(
             - "bin_size_ms": Bin size used
     """
     # Get stimulus presentations
-    stim_df = session.stimulus_presentations.copy()
+    stim_df = _get_stimulus_presentations(session)
+    
+    if len(stim_df) == 0:
+        raise ValueError("No stimulus presentations found in session")
     
     if stimulus_name is not None:
         stim_df = stim_df[stim_df["stimulus_name"] == stimulus_name]
@@ -296,21 +261,24 @@ def extract_trials(
     
     # Get spike times and filter units (reuse logic from bin_session)
     spike_times_dict = session.spike_times
-    units_df = session.units.copy()
+    units_df = _get_units_df(session)
     
     if unit_ids is not None:
         selected_ids = [uid for uid in unit_ids if uid in spike_times_dict]
     else:
-        if area_filter is not None:
+        # Apply area filter (only if column exists)
+        if area_filter is not None and "ecephys_structure_acronym" in units_df.columns:
             if isinstance(area_filter, str):
                 area_filter = [area_filter]
             units_df = units_df[units_df["ecephys_structure_acronym"].isin(area_filter)]
         
+        # Apply quality filter (only if relevant columns exist)
         if quality_filter == "good":
             if "quality" in units_df.columns:
                 units_df = units_df[units_df["quality"] == "good"]
             elif "isi_violations" in units_df.columns:
                 units_df = units_df[units_df["isi_violations"] < 0.5]
+            # If no quality columns, keep all units
         
         selected_ids = list(units_df.index)
     
