@@ -1,17 +1,15 @@
 # list of things to work on:
 
 ## immediate:
-1. implement encoder script
-- & test script for validation
-2. implement predictor script
-- & test script for validation
+1. validate latent representations across time (ensure doesn't collapse through training)
+2. implement VIC regularization
+3. can JEPA learn something meaningful? (behavior?)
+4. implement SNN to align to latent representations
 
 ## future:
-1. implement proof of concept script 
-    - analyzing if JEPA performs well on a singular session
-    - builds foundation for JEPA with allen institute neuropixels dataset
-    - can SNN's learn from the learned latent representations?
+1. compare active vs. passive blocks within the same session
+    - does the manifold shift? How? Gain, Rotation, Inclusion? does the SNN generalize? 
 
 
 ## longterm:
-1. 
+1. Scale across multiple sessions
