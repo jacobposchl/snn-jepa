@@ -6,10 +6,7 @@ Converts raw spike times into binned spike counts suitable for neural network in
 Core functions:
     - bin_spike_times: Bin spike times for a single unit
     - bin_population: Bin spike times for multiple units simultaneously
-
-Allen SDK integration:
-    - bin_session: Bin all/selected units from an Allen SDK session
-    - extract_trials: Extract trial-aligned binned data around stimulus events
+    - bin_trial_aligned: Bin spikes aligned to specific events
 
 Utilities:
     - get_time_bins: Generate time bin edges for a given range
@@ -24,32 +21,6 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-
-
-def _get_units_df(session) -> pd.DataFrame:
-    """
-    Get units DataFrame from Allen SDK BehaviorEcephysSession.
-    
-    Args:
-        session: Allen SDK BehaviorEcephysSession object
-        
-    Returns:
-        DataFrame with unit metadata, indexed by unit_id
-    """
-    return session.get_units().copy()
-
-
-def _get_stimulus_presentations(session) -> pd.DataFrame:
-    """
-    Get stimulus presentations DataFrame from Allen SDK BehaviorEcephysSession.
-    
-    Args:
-        session: Allen SDK BehaviorEcephysSession object
-        
-    Returns:
-        DataFrame with stimulus presentation info
-    """
-    return session.stimulus_presentations.copy()
 
 
 def get_time_bins(
@@ -121,82 +92,82 @@ def bin_population(
     return binned, list(unit_ids)
 
 
-def bin_session(
-    session,
-    bin_size_ms: float = 10.0,
-    start_time: Optional[float] = None,
-    end_time: Optional[float] = None,
-    unit_ids: Optional[Sequence[int]] = None,
-    area_filter: Optional[Union[str, list[str]]] = None,
-    quality_filter: Optional[str] = "good",
+def bin_trial_aligned(
+    spike_times_dict: dict[int, np.ndarray],
+    event_times: np.ndarray,
+    unit_ids: Sequence[int],
+    bin_size_ms: float,
+    pre_time_ms: float,
+    post_time_ms: float,
     as_torch: bool = False,
 ) -> dict:
     """
-    Bin all/selected units from an Allen SDK BehaviorEcephysSession.
+    Bin spikes aligned to specific event times (e.g., stimulus onset, reward).
+    
+    Creates a 3D array of shape (n_events, n_units, n_time_bins) where each
+    event is aligned to time zero.
     
     Args:
-        session: Allen SDK BehaviorEcephysSession object
+        spike_times_dict: Dict mapping unit_id -> spike times array (in seconds)
+        event_times: Array of event times to align to (in seconds)
+        unit_ids: List of unit IDs to include in output
         bin_size_ms: Bin size in milliseconds (default: 10ms)
-        start_time: Start time in seconds (default: session start)
-        end_time: End time in seconds (default: session end)
-        unit_ids: Specific unit IDs to include (overrides area/quality filters)
-        area_filter: Brain area(s) to include, e.g. "VISp" or ["VISp", "VISl"]
-        quality_filter: Unit quality filter - "good", "all", or None
+        pre_time_ms: Time before event to include (ms, default: 500ms)
+        post_time_ms: Time after event to include (ms, default: 500ms)
         as_torch: If True, return torch.Tensor instead of numpy array
         
     Returns:
         Dict containing:
-            - "binned": Binned spike counts, shape (n_units, n_bins)
-            - "unit_ids": List of unit IDs
-            - "bin_edges": Array of bin edges in seconds
+            - "binned": Event-aligned data, shape (n_events, n_units, n_time_bins)
+            - "unit_ids": List of unit IDs (same order as array dimension)
+            - "time_bins_ms": Time bin centers relative to event (ms)
             - "bin_size_ms": Bin size used
-            - "units_df": DataFrame with unit metadata for included units
+            - "bin_edges_relative": Bin edges relative to event (seconds)
+            
+    Example:
+        # Get change times from trials
+        change_times = trials['change_time_no_display_delay'].values
+        
+        # Bin spikes around changes
+        result = bin_trial_aligned(
+            spike_times_dict=session.spike_times,
+            event_times=change_times,
+            unit_ids=[123, 456, 789],
+            bin_size_ms=10,
+            pre_time_ms=500,
+            post_time_ms=1000
+        )
+        # result['binned'] has shape (n_changes, 3, 150)
     """
-    # Get spike times and units table
-    spike_times_dict = session.spike_times
-    units_df = _get_units_df(session)
+    # Convert to seconds
+    pre_time_s = pre_time_ms / 1000.0
+    post_time_s = post_time_ms / 1000.0
     
-    # Apply filters to select units
-    if unit_ids is not None:
-        # Use explicitly provided unit IDs
-        selected_ids = [uid for uid in unit_ids if uid in spike_times_dict]
-    else:
-        # Apply area filter (only if column exists)
-        if area_filter is not None and "ecephys_structure_acronym" in units_df.columns:
-            if isinstance(area_filter, str):
-                area_filter = [area_filter]
-            units_df = units_df[units_df["ecephys_structure_acronym"].isin(area_filter)]
+    # Create template bin edges relative to event (time 0)
+    template_bins = get_time_bins(-pre_time_s, post_time_s, bin_size_ms)
+    n_time_bins = len(template_bins) - 1
+    n_events = len(event_times)
+    n_units = len(unit_ids)
+    
+    # Pre-allocate output
+    binned = np.zeros((n_events, n_units, n_time_bins), dtype=np.float32)
+    
+    # Bin spikes for each event
+    for event_idx, event_time in enumerate(event_times):
+        # Absolute bin edges for this event
+        event_bins = template_bins + event_time
         
-        # Apply quality filter (only if relevant columns exist)
-        if quality_filter == "good":
-            if "quality" in units_df.columns:
-                units_df = units_df[units_df["quality"] == "good"]
-            elif "isi_violations" in units_df.columns:
-                # Fallback: use ISI violations < 0.5 as quality proxy
-                units_df = units_df[units_df["isi_violations"] < 0.5]
-            # If no quality columns, keep all units
-        
-        selected_ids = list(units_df.index)
+        for unit_idx, uid in enumerate(unit_ids):
+            if uid in spike_times_dict:
+                spikes = spike_times_dict[uid]
+                # Filter spikes within window
+                mask = (spikes >= event_bins[0]) & (spikes <= event_bins[-1])
+                window_spikes = spikes[mask]
+                binned[event_idx, unit_idx] = bin_spike_times(window_spikes, event_bins)
     
-    # Filter units_df to only selected units
-    units_df = units_df.loc[units_df.index.isin(selected_ids)]
+    # Time bin centers (in ms, relative to event)
+    time_bins_ms = (template_bins[:-1] + template_bins[1:]) / 2 * 1000
     
-    # Determine time range
-    if start_time is None or end_time is None:
-        all_spikes = np.concatenate([
-            spike_times_dict[uid] for uid in selected_ids 
-            if len(spike_times_dict[uid]) > 0
-        ])
-        if start_time is None:
-            start_time = float(np.min(all_spikes))
-        if end_time is None:
-            end_time = float(np.max(all_spikes))
-    
-    # Generate bin edges and bin the data
-    bin_edges = get_time_bins(start_time, end_time, bin_size_ms)
-    binned, unit_ids_ordered = bin_population(spike_times_dict, bin_edges, selected_ids)
-    
-    # Convert to torch if requested
     if as_torch:
         if not TORCH_AVAILABLE:
             raise ImportError("PyTorch not available. Install with: pip install torch")
@@ -204,140 +175,8 @@ def bin_session(
     
     return {
         "binned": binned,
-        "unit_ids": unit_ids_ordered,
-        "bin_edges": bin_edges,
-        "bin_size_ms": bin_size_ms,
-        "units_df": units_df,
-    }
-
-
-def extract_trials(
-    session,
-    bin_size_ms: float = 10.0,
-    pre_time_ms: float = 500.0,
-    post_time_ms: float = 500.0,
-    stimulus_name: Optional[str] = None,
-    unit_ids: Optional[Sequence[int]] = None,
-    area_filter: Optional[Union[str, list[str]]] = None,
-    quality_filter: Optional[str] = "good",
-    as_torch: bool = False,
-) -> dict:
-    """
-    Extract trial-aligned binned data around stimulus presentations.
-    
-    Creates a 3D tensor of shape (n_trials, n_units, n_time_bins) where each
-    trial is aligned to stimulus onset.
-    
-    Args:
-        session: Allen SDK BehaviorEcephysSession object
-        bin_size_ms: Bin size in milliseconds
-        pre_time_ms: Time before stimulus onset to include (ms)
-        post_time_ms: Time after stimulus onset to include (ms)
-        stimulus_name: Filter for specific stimulus type (e.g., "natural_movie_one")
-        unit_ids: Specific unit IDs to include
-        area_filter: Brain area(s) to include
-        quality_filter: Unit quality filter
-        as_torch: If True, return torch.Tensor
-        
-    Returns:
-        Dict containing:
-            - "trials": Trial-aligned data, shape (n_trials, n_units, n_time_bins)
-            - "unit_ids": List of unit IDs
-            - "stimulus_df": DataFrame with stimulus presentation info
-            - "time_bins_ms": Time bin centers relative to stimulus onset (ms)
-            - "bin_size_ms": Bin size used
-    """
-    # Get stimulus presentations
-    stim_df = _get_stimulus_presentations(session)
-    
-    if len(stim_df) == 0:
-        raise ValueError("No stimulus presentations found in session")
-    
-    if stimulus_name is not None:
-        stim_df = stim_df[stim_df["stimulus_name"] == stimulus_name]
-    
-    if len(stim_df) == 0:
-        raise ValueError(f"No stimulus presentations found for: {stimulus_name}")
-    
-    # Get spike times and filter units (reuse logic from bin_session)
-    spike_times_dict = session.spike_times
-    units_df = _get_units_df(session)
-    
-    if unit_ids is not None:
-        selected_ids = [uid for uid in unit_ids if uid in spike_times_dict]
-    else:
-        # Apply area filter (only if column exists)
-        if area_filter is not None and "ecephys_structure_acronym" in units_df.columns:
-            if isinstance(area_filter, str):
-                area_filter = [area_filter]
-            units_df = units_df[units_df["ecephys_structure_acronym"].isin(area_filter)]
-        
-        # Apply quality filter (only if relevant columns exist)
-        if quality_filter == "good":
-            if "quality" in units_df.columns:
-                units_df = units_df[units_df["quality"] == "good"]
-            elif "isi_violations" in units_df.columns:
-                units_df = units_df[units_df["isi_violations"] < 0.5]
-            # If no quality columns, keep all units
-        
-        selected_ids = list(units_df.index)
-    
-    # Calculate dimensions
-    pre_time_s = pre_time_ms / 1000.0
-    post_time_s = post_time_ms / 1000.0
-    trial_duration_s = pre_time_s + post_time_s
-    
-    # Template bin edges for a single trial (relative to onset)
-    template_bins = get_time_bins(-pre_time_s, post_time_s, bin_size_ms)
-    n_time_bins = len(template_bins) - 1
-    n_trials = len(stim_df)
-    n_units = len(selected_ids)
-    
-    # Pre-allocate output array
-    trials = np.zeros((n_trials, n_units, n_time_bins), dtype=np.float32)
-    
-    # Extract each trial
-    onset_times = stim_df["start_time"].values
-    
-    for trial_idx, onset in enumerate(onset_times):
-        # Bin edges for this trial
-        trial_bins = template_bins + onset
-        
-        for unit_idx, uid in enumerate(selected_ids):
-            spikes = spike_times_dict[uid]
-            # Only consider spikes within the trial window
-            mask = (spikes >= trial_bins[0]) & (spikes <= trial_bins[-1])
-            trial_spikes = spikes[mask]
-            trials[trial_idx, unit_idx] = bin_spike_times(trial_spikes, trial_bins)
-    
-    # Time bin centers relative to onset (in ms)
-    time_bins_ms = (template_bins[:-1] + template_bins[1:]) / 2 * 1000
-    
-    if as_torch:
-        if not TORCH_AVAILABLE:
-            raise ImportError("PyTorch not available. Install with: pip install torch")
-        trials = torch.from_numpy(trials)
-    
-    return {
-        "trials": trials,
-        "unit_ids": selected_ids,
-        "stimulus_df": stim_df,
+        "unit_ids": list(unit_ids),
         "time_bins_ms": time_bins_ms,
         "bin_size_ms": bin_size_ms,
+        "bin_edges_relative": template_bins,
     }
-
-
-# Convenience aliases for common bin sizes
-def bin_1ms(spike_times: np.ndarray, bin_edges: np.ndarray) -> np.ndarray:
-    """Bin at 1ms resolution."""
-    return bin_spike_times(spike_times, bin_edges)
-
-
-def bin_10ms(spike_times: np.ndarray, bin_edges: np.ndarray) -> np.ndarray:
-    """Bin at 10ms resolution."""
-    return bin_spike_times(spike_times, bin_edges)
-
-
-def bin_50ms(spike_times: np.ndarray, bin_edges: np.ndarray) -> np.ndarray:
-    """Bin at 50ms resolution."""
-    return bin_spike_times(spike_times, bin_edges)
