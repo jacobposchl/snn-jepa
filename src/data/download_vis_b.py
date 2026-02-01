@@ -150,6 +150,62 @@ def save_download_tracking(cache_dir: Path, tracking: dict) -> None:
         json.dump(tracking, f, indent=2)
 
 
+def download_metadata_only(cache: VisualBehaviorNeuropixelsProjectCache, cache_dir: Path) -> None:
+    """Download only metadata tables without session data.
+    
+    This downloads the manifest information (~160 MB) which is sufficient
+    for dataset exploration and analysis without downloading full sessions.
+    
+    Args:
+        cache: The project cache
+        cache_dir: Path to cache directory
+    """
+    print("\n" + "="*80)
+    print("DOWNLOADING METADATA ONLY")
+    print("="*80)
+    print("\nFetching metadata tables from Allen Institute...")
+    print("(This may take 1-2 minutes)")
+    
+    try:
+        # These calls fetch and cache the metadata
+        print("\n  • Fetching ecephys sessions table...")
+        sessions = cache.get_ecephys_session_table()
+        print(f"    ✓ {len(sessions)} sessions")
+        
+        print("  • Fetching behavior sessions table...")
+        behavior = cache.get_behavior_session_table()
+        print(f"    ✓ {len(behavior)} behavior sessions")
+        
+        print("  • Fetching units table...")
+        units = cache.get_unit_table()
+        print(f"    ✓ {len(units)} units")
+        
+        print("  • Fetching probes table...")
+        probes = cache.get_probe_table()
+        print(f"    ✓ {len(probes)} probes")
+        
+        print("  • Fetching channels table...")
+        channels = cache.get_channel_table()
+        print(f"    ✓ {len(channels)} channels")
+        
+        # Save metadata flag
+        metadata_file = cache_dir / '.metadata_downloaded'
+        metadata_file.write_text(datetime.now().isoformat())
+        
+        print("\n" + "="*80)
+        print("✓ Metadata download complete!")
+        print("="*80)
+        print(f"\nMetadata saved to: {cache_dir}")
+        print(f"\nYou can now run analysis commands:")
+        print(f"  python data_analysis.py --overview --cache-dir {cache_dir}")
+        print(f"  python data_analysis.py --session <session_id> --cache-dir {cache_dir}")
+        print("\n" + "="*80 + "\n")
+        
+    except Exception as e:
+        print(f"\n✗ Error downloading metadata: {e}")
+        raise
+
+
 def list_available_sessions(cache: VisualBehaviorNeuropixelsProjectCache) -> None:
 
     sessions_table = cache.get_ecephys_session_table()
@@ -279,6 +335,12 @@ def main():
     )
     
     parser.add_argument(
+        "--metadata-only",
+        action="store_true",
+        help="Download only metadata tables (~160 MB) without session neural data",
+    )
+    
+    parser.add_argument(
         "--list",
         action="store_true",
         dest="list_sessions",
@@ -347,6 +409,12 @@ def main():
     # Initialize cache
     print(f"Initializing cache at: {args.output}")
     cache = get_cache(args.output)
+    cache_dir = Path(args.output)
+    
+    # Handle --metadata-only flag
+    if args.metadata_only:
+        download_metadata_only(cache, cache_dir)
+        return
     
     # Handle --info flag
     if args.info:

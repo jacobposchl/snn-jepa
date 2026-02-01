@@ -31,22 +31,27 @@ from allensdk.brain_observatory.behavior.behavior_project_cache import (
 class VBNDataHandler:
     """Handler for accessing Visual Behavior Neuropixels data."""
     
-    def __init__(self, cache_dir: Union[str, Path]):
+    def __init__(self, cache_dir: Union[str, Path], metadata_only: bool = False):
         """
         Initialize data handler with cache directory.
         
         Args:
             cache_dir: Path to the visual behavior neuropixels cache directory
+            metadata_only: If True, only use metadata tables and block session downloads
         """
 
         self.cache_dir = Path(cache_dir)
-        if not self.cache_dir.exists():
-            raise ValueError(f"Cache directory does not exist: {cache_dir}")
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.metadata_only = metadata_only
         
         self.cache = VisualBehaviorNeuropixelsProjectCache.from_s3_cache(
             cache_dir=self.cache_dir
         )
         self._sessions_table = None
+        self._behavior_sessions_table = None
+        self._units_table = None
+        self._probes_table = None
+        self._channels_table = None
     
     @property
     def sessions_table(self) -> pd.DataFrame:
@@ -54,6 +59,34 @@ class VBNDataHandler:
         if self._sessions_table is None:
             self._sessions_table = self.cache.get_ecephys_session_table()
         return self._sessions_table
+    
+    @property
+    def behavior_sessions_table(self) -> pd.DataFrame:
+        """Lazy-load and cache the behavior sessions table."""
+        if self._behavior_sessions_table is None:
+            self._behavior_sessions_table = self.cache.get_behavior_session_table()
+        return self._behavior_sessions_table
+    
+    @property
+    def units_table(self) -> pd.DataFrame:
+        """Lazy-load and cache the units table."""
+        if self._units_table is None:
+            self._units_table = self.cache.get_unit_table()
+        return self._units_table
+    
+    @property
+    def probes_table(self) -> pd.DataFrame:
+        """Lazy-load and cache the probes table."""
+        if self._probes_table is None:
+            self._probes_table = self.cache.get_probe_table()
+        return self._probes_table
+    
+    @property
+    def channels_table(self) -> pd.DataFrame:
+        """Lazy-load and cache the channels table."""
+        if self._channels_table is None:
+            self._channels_table = self.cache.get_channel_table()
+        return self._channels_table
     
     # Session Loading
     def load_session(self, session_id: int):
@@ -66,6 +99,11 @@ class VBNDataHandler:
         Returns:
             Session object with all data streams available
         """
+        if self.metadata_only:
+            raise RuntimeError(
+                "Session data loading is disabled (metadata_only=True). "
+                "Use metadata tables or initialize without metadata_only to load sessions."
+            )
         return self.cache.get_ecephys_session(ecephys_session_id=session_id)
     
     def load_sessions(self, session_ids: List[int]) -> Dict[int, Any]:
@@ -631,4 +669,190 @@ class VBNDataHandler:
             except Exception as e:
                 print(f"Failed to load session {session_id}: {e}")
                 continue
+    
+    # Dataset Overview
+    def print_dataset_overview(self):
+        """Print comprehensive overview of the entire dataset."""
+        
+        print("\n" + "="*80)
+        print("VISUAL BEHAVIOR NEUROPIXELS DATASET OVERVIEW")
+        print("="*80)
+        
+        # Load all metadata tables
+        sessions_table = self.sessions_table
+        behavior_table = self.behavior_sessions_table
+        units_table = self.units_table
+        probes_table = self.probes_table
+        channels_table = self.channels_table
+        
+        # ========== RECORDING SESSIONS ==========
+        print("\n--- RECORDING SESSIONS ---")
+        print(f"Total ecephys sessions: {len(sessions_table)}")
+        print(f"Total unique mice: {sessions_table['mouse_id'].nunique()}")
+        
+        # Check for filtered sessions
+        try:
+            all_sessions = self.cache.get_ecephys_session_table(filter_abnormalities=False)
+            if len(all_sessions) > len(sessions_table):
+                filtered_count = len(all_sessions) - len(sessions_table)
+                print(f"\nNote: {filtered_count} additional sessions exist but were filtered for quality issues")
+                print(f"      (abnormal histology or electrical activity)")
+                print(f"      Total recorded sessions: {len(all_sessions)}")
+        except:
+            pass
+        
+        print("\nSessions by image set:")
+        print(sessions_table['image_set'].value_counts())
+        
+        print("\nSessions by experience level:")
+        print(sessions_table['experience_level'].value_counts())
+        
+        print("\nSessions by session number (1st vs 2nd recording day):")
+        print(sessions_table['session_number'].value_counts())
+        
+        print("\nSessions by genotype:")
+        print(sessions_table['genotype'].value_counts())
+        
+        print("\nSessions by sex:")
+        print(sessions_table['sex'].value_counts())
+        
+        # ========== PROBES ==========
+        print("\n--- PROBE DATA ---")
+        print(f"Total probe insertions: {len(probes_table)}")
+        
+        # Check unique sessions in probes table
+        unique_sessions_with_probes = probes_table['ecephys_session_id'].nunique()
+        filtered_sessions = unique_sessions_with_probes - len(sessions_table)
+        
+        print(f"\nSession Quality Control:")
+        print(f"  Total sessions attempted (with probe data): {unique_sessions_with_probes}")
+        print(f"  Quality-controlled sessions (in ecephys_sessions_table): {len(sessions_table)}")
+        print(f"  Filtered out sessions (failed QC): {filtered_sessions}")
+        
+        # Verify this by checking if probe sessions exist in ecephys_sessions_table
+        probe_session_ids = set(probes_table['ecephys_session_id'].unique())
+        ecephys_session_ids = set(sessions_table.index)
+        filtered_session_ids = probe_session_ids - ecephys_session_ids
+        
+        print(f"\nVerification:")
+        print(f"  Sessions in probes_table not in ecephys_sessions_table: {len(filtered_session_ids)}")
+        if len(filtered_session_ids) > 0:
+            print(f"  (These {len(filtered_session_ids)} sessions were filtered for quality issues)")
+        
+        print(f"\nProbe insertion statistics:")
+        print(f"  Average probes per session: {len(probes_table) / unique_sessions_with_probes:.1f}")
+        
+        probes_per_session = probes_table.groupby('ecephys_session_id').size()
+        sessions_with_6_probes = (probes_per_session == 6).sum()
+        sessions_with_5_or_more = (probes_per_session >= 5).sum()
+        
+        print(f"  Sessions with exactly 6 probes: {sessions_with_6_probes}")
+        print(f"  Sessions with 5+ probes: {sessions_with_5_or_more}")
+        print(f"  Min probes in a session: {probes_per_session.min()}")
+        print(f"  Max probes in a session: {probes_per_session.max()}")
+        
+        # Check for probe_type column
+        if 'probe_type' in probes_table.columns:
+            print("\nProbe types:")
+            print(probes_table['probe_type'].value_counts())
+        elif 'model_name' in probes_table.columns:
+            print("\nProbe models:")
+            print(probes_table['model_name'].value_counts())
+        
+        # ========== CHANNELS ==========
+        print("\n--- CHANNELS ---")
+        print(f"Total channels: {len(channels_table)}")
+        if len(probes_table) > 0:
+            print(f"Average channels per probe: {len(channels_table) / len(probes_table):.0f}")
+        
+        # ========== UNITS ==========
+        print("\n--- UNITS (NEURONS) ---")
+        print(f"Total units: {len(units_table)}")
+        print(f"Average units per session: {len(units_table) / len(sessions_table):.0f}")
+        
+        print("\nUnit quality distribution:")
+        print(units_table['quality'].value_counts())
+        quality_pct = (units_table['quality'].value_counts() / len(units_table) * 100).round(1)
+        print(quality_pct)
+        
+        # Find the correct column name for brain areas
+        area_col = None
+        if 'ecephys_structure_acronym' in units_table.columns:
+            area_col = 'ecephys_structure_acronym'
+        elif 'structure_acronym' in units_table.columns:
+            area_col = 'structure_acronym'
+        
+        if area_col:
+            print("\nTop 15 brain areas by unit count:")
+            top_areas = units_table[area_col].value_counts().head(15)
+            for area, count in top_areas.items():
+                pct = (count / len(units_table) * 100)
+                print(f"  {area:10s}: {count:5d} units ({pct:5.1f}%)")
+            
+            print(f"\nTotal unique brain areas: {units_table[area_col].nunique()}")
+        else:
+            print("\nBrain area information not available")
+        
+        # ========== BEHAVIORAL DATA ==========
+        print("\n--- BEHAVIORAL TRAINING ---")
+        print(f"Total behavior sessions: {len(behavior_table)}")
+        
+        print("\nBehavior sessions by equipment:")
+        print(behavior_table['equipment_name'].value_counts())
+        
+        print("\nTop training stages:")
+        top_stages = behavior_table['session_type'].value_counts().head(10)
+        for stage, count in top_stages.items():
+            print(f"  {stage}: {count}")
+        
+        # ========== SUMMARY STATISTICS ==========
+        print("\n--- SUMMARY STATISTICS ---")
+        print(f"\nUnit quality metrics (good units only):")
+        good_units = units_table[units_table['quality'] == 'good']
+        print(f"  Good units: {len(good_units)} ({len(good_units)/len(units_table)*100:.1f}%)")
+        
+        # Safely access optional columns
+        metrics = {
+            'snr': ('SNR', '.2f'),
+            'firing_rate': ('Firing rate', '.2f Hz'),
+            'isolation_distance': ('Isolation distance', '.2f'),
+            'amplitude': ('Amplitude', '.2f µV'),
+        }
+        
+        for col, (label, fmt) in metrics.items():
+            if col in good_units.columns:
+                val = good_units[col].mean()
+                if fmt.endswith('Hz'):
+                    print(f"  Avg {label}: {val:.2f} Hz")
+                elif fmt.endswith('µV'):
+                    print(f"  Avg {label}: {val:.2f} µV")
+                else:
+                    print(f"  Avg {label}: {val:.2f}")
+        
+        print(f"\nWaveform metrics (good units):")
+        waveform_metrics = {
+            'waveform_duration': ('waveform duration', 'ms'),
+            'amplitude_cutoff': ('amplitude cutoff', '%'),
+            'isi_violations': ('ISI violations', ''),
+        }
+        
+        for col, (label, unit) in waveform_metrics.items():
+            if col in good_units.columns:
+                val = good_units[col].mean()
+                if unit == '%':
+                    print(f"  Avg {label}: {val:.2%}")
+                elif unit == 'ms':
+                    print(f"  Avg {label}: {val:.2f} {unit}")
+                else:
+                    print(f"  Avg {label}: {val:.4f}")
+        
+        # ========== BRAIN AREA COVERAGE ==========
+        print("\n--- BRAIN AREA COVERAGE ---")
+        unique_areas_per_session = sessions_table['structure_acronyms'].apply(
+            lambda x: len(eval(x)) if isinstance(x, str) else 0
+        )
+        print(f"Average brain areas per session: {unique_areas_per_session.mean():.1f}")
+        print(f"Max brain areas in single session: {unique_areas_per_session.max()}")
+        
+        print("\n" + "="*80 + "\n")
 
