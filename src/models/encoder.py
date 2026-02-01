@@ -253,7 +253,7 @@ class NeuralEncoder(nn.Module):
 def create_encoder(
     n_units: int,
     latent_dim: int,
-    encoder_type: str = "mlp",
+    encoder_type: str,
     **kwargs,
 ) -> NeuralEncoder:
     """
