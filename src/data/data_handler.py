@@ -398,7 +398,7 @@ class VBNDataHandler:
         
         if genotype:
             filtered = filtered[
-                filtered['full_genotype'].str.contains(genotype, case=False, na=False)
+                filtered['genotype'].str.contains(genotype, case=False, na=False)
             ]
         
         if experience_level:

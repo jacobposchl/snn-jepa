@@ -48,7 +48,7 @@ def filter_sessions(
     filtered = sessions_table.copy()
     
     if genotype:
-        filtered = filtered[filtered['full_genotype'].str.contains(genotype, case=False, na=False)]
+        filtered = filtered[filtered['genotype'].str.contains(genotype, case=False, na=False)]
     
     if experience_level:
         filtered = filtered[filtered['experience_level'] == experience_level]
@@ -69,57 +69,7 @@ def filter_sessions(
     return list(filtered.index)
 
 
-def show_session_info(cache: VisualBehaviorNeuropixelsProjectCache, session_ids: List[int]) -> None:
-    """Display detailed information about specified sessions.
-    
-    Args:
-        cache: The project cache
-        session_ids: List of session IDs to display info for
-    """
-    sessions_table = cache.get_ecephys_session_table()
-    
-    for session_id in session_ids:
-        if session_id not in sessions_table.index:
-            print(f"\nSession {session_id}: NOT FOUND")
-            continue
-        
-        row = sessions_table.loc[session_id]
-        
-        print(f"\n{'='*80}")
-        print(f"Session ID: {session_id}")
-        print(f"{'='*80}")
-        print(f"Mouse ID: {row.get('mouse_id', 'N/A')}")
-        print(f"Session Type: {row.get('session_type', 'N/A')}")
-        print(f"Genotype: {row.get('full_genotype', 'N/A')}")
-        print(f"Experience Level: {row.get('experience_level', 'N/A')}")
-        print(f"Sex: {row.get('sex', 'N/A')}")
-        print(f"Image Set: {row.get('image_set', 'N/A')}")
-        
-        # Brain areas
-        areas = row.get('structure_acronyms', [])
-        if isinstance(areas, list) and areas:
-            print(f"Brain Areas Recorded: {', '.join(areas)}")
-        else:
-            print(f"Brain Areas Recorded: N/A")
-        
-        # Try to load session to get unit counts
-        try:
-            print("\nLoading session data...")
-            session = cache.get_ecephys_session(ecephys_session_id=session_id)
-            units = session.units
-            probes = session.probes
-            
-            print(f"Total Units: {len(units)}")
-            print(f"Total Probes: {len(probes)}")
-            
-            # Units per brain area
-            if hasattr(units, 'ecephys_structure_acronym'):
-                area_counts = units['ecephys_structure_acronym'].value_counts()
-                print("\nUnits per brain area:")
-                for area, count in area_counts.items():
-                    print(f"  {area}: {count}")
-        except Exception as e:
-            print(f"Could not load session data: {e}")
+
 
 
 def load_download_tracking(cache_dir: Path) -> dict:
@@ -224,7 +174,6 @@ def download_sessions(
     session_ids: list,
     download_all: bool = False,
     force_redownload: bool = False,
-    dry_run: bool = False,
 ) -> None:
 
     sessions_table = cache.get_ecephys_session_table()
@@ -262,13 +211,6 @@ def download_sessions(
     print(f"\n{'='*80}")
     print(f"Sessions to download: {len(session_ids)}")
     print(f"{'='*80}")
-    
-    if dry_run:
-        print("\nDRY RUN - Would download the following sessions:")
-        for session_id in session_ids:
-            row = sessions_table.loc[session_id]
-            print(f"  {session_id} | Mouse: {row.get('mouse_id', 'N/A')} | Type: {row.get('session_type', 'N/A')}")
-        return
     
     successful = 0
     failed = 0
@@ -380,22 +322,9 @@ def main():
     
     # Info and utility options
     parser.add_argument(
-        "--info",
-        nargs="+",
-        type=int,
-        help="Show detailed information about specific session IDs",
-    )
-    
-    parser.add_argument(
         "--export-metadata",
         type=str,
         help="Export filtered session metadata to CSV file",
-    )
-    
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be downloaded without actually downloading",
     )
     
     parser.add_argument(
@@ -414,11 +343,6 @@ def main():
     # Handle --metadata-only flag
     if args.metadata_only:
         download_metadata_only(cache, cache_dir)
-        return
-    
-    # Handle --info flag
-    if args.info:
-        show_session_info(cache, args.info)
         return
     
     # Handle --list flag
@@ -488,7 +412,6 @@ def main():
             session_ids,
             download_all=False,
             force_redownload=args.force_redownload,
-            dry_run=args.dry_run,
         )
     else:
         # No filters, handle --sessions normally
@@ -498,7 +421,6 @@ def main():
                 [],
                 download_all=True,
                 force_redownload=args.force_redownload,
-                dry_run=args.dry_run,
             )
         else:
             # Convert session IDs to integers
@@ -513,7 +435,6 @@ def main():
                 session_ids,
                 download_all=False,
                 force_redownload=args.force_redownload,
-                dry_run=args.dry_run,
             )
 
 
