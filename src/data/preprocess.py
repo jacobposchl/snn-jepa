@@ -75,7 +75,24 @@ class NeuropixelsPreprocessor:
         self._validate_session_structure()
     
     def _validate_session_structure(self) -> None:
-        """Ensure session_data has expected keys."""
+        """Ensure session_data has expected keys or is a valid session object."""
+        # Check if data is NOT a dictionary (i.e., it's a session object)
+        if not isinstance(self.data, dict):
+            # It's a session object - extract the needed attributes
+            try:
+                self.data = {
+                    'units': self.data.get_units(),
+                    'spike_times': self.data.spike_times,
+                    'trials': self.data.trials,
+                    'stimulus_presentations': self.data.stimulus_presentations,
+                    'running_speed': getattr(self.data, 'running_speed', None),
+                    'licks': getattr(self.data, 'licks', None),
+                    'rewards': getattr(self.data, 'rewards', None),
+                }
+            except (AttributeError, TypeError) as e:
+                raise ValueError(f"Session object missing required attribute: {e}")
+        
+        # Now validate as dictionary
         required_keys = ['units', 'spike_times', 'trials', 'stimulus_presentations']
         missing = [k for k in required_keys if k not in self.data]
         if missing:
@@ -154,18 +171,18 @@ class NeuropixelsPreprocessor:
         
         # Determine spike time bounds
         if spike_time_bounds is None:
-            trials = self.data.get('trials')
-            if trials is not None and len(trials) > 0:
+            stimulus = self.data.get('stimulus_presentations')
+            if stimulus is not None and len(stimulus) > 0:
                 spike_time_bounds = (
-                    trials['start_time'].min(),
-                    trials['end_time'].max()
+                    stimulus['start_time'].min(),
+                    stimulus['end_time'].max()
                 )
             else:
-                stimulus = self.data.get('stimulus_presentations')
-                if stimulus is not None and len(stimulus) > 0:
+                trials = self.data.get('trials')
+                if trials is not None and len(trials) > 0 and 'start_time' in trials.columns:
                     spike_time_bounds = (
-                        stimulus['start_time'].min(),
-                        stimulus['end_time'].max()
+                        trials['start_time'].min(),
+                        trials['start_time'].max() + 10  # Add 10 seconds as buffer for end
                     )
         
         # Clean spike times

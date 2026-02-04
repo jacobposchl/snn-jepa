@@ -61,6 +61,7 @@ requests-toolbelt==1.0.0
 rpds-py==0.30.0
 ruamel.yaml==0.19.1
 s3transfer==0.16.0
+scikit-learn==1.7.2
 scikit-build==0.18.1
 scikit-image==0.24.0
 scipy==1.10.1
@@ -73,6 +74,7 @@ SQLAlchemy==2.0.45
 statsmodels==0.14.6
 tables==3.10.1
 tifffile==2025.5.10
+torch==2.10.0
 tomli==2.4.0
 tqdm==4.67.1
 typing_extensions==4.15.0

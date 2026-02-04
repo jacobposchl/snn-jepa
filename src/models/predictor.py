@@ -145,10 +145,19 @@ class MLPPredictor(nn.Module):
 
 class RNNPredictor(nn.Module):
     """
-    RNN-based predictor for JEPA (future implementation placeholder).
+    RNN-based predictor for JEPA.
     
-    Uses recurrent layers to process sequential context and predict future latents.
+    Uses recurrent layers (LSTM or GRU) to process sequential context and predict future latents.
     Better suited for long-term dependencies than MLP.
+    
+    Args:
+        latent_dim: Dimensionality of input/output latent representations
+        horizon: Number of future time steps to predict
+        context_len: Number of past time steps to use as context
+        hidden_dim: Hidden dimension of RNN (default: 256)
+        num_layers: Number of RNN layers (default: 2)
+        rnn_type: Type of RNN ('LSTM' or 'GRU', default: 'LSTM')
+        dropout: Dropout probability in RNN (default: 0.0)
     """
     
     def __init__(
@@ -162,8 +171,70 @@ class RNNPredictor(nn.Module):
         dropout: float = 0.0,
     ):
         super().__init__()
-        # Placeholder - to be implemented when needed
-        raise NotImplementedError("RNNPredictor not yet implemented")
+        
+        self.latent_dim = latent_dim
+        self.horizon = horizon
+        self.context_len = context_len
+        self.hidden_dim = hidden_dim
+        self.rnn_type = rnn_type.upper()
+        
+        # RNN layer
+        if self.rnn_type == "LSTM":
+            self.rnn = nn.LSTM(
+                input_size=latent_dim,
+                hidden_size=hidden_dim,
+                num_layers=num_layers,
+                dropout=dropout if num_layers > 1 else 0.0,
+                batch_first=True,
+            )
+        elif self.rnn_type == "GRU":
+            self.rnn = nn.GRU(
+                input_size=latent_dim,
+                hidden_size=hidden_dim,
+                num_layers=num_layers,
+                dropout=dropout if num_layers > 1 else 0.0,
+                batch_first=True,
+            )
+        else:
+            raise ValueError(f"Unknown RNN type: {rnn_type}")
+        
+        # Prediction head: hidden state -> sequence of future embeddings
+        self.prediction_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, horizon * latent_dim),
+        )
+    
+    def forward(self, context: torch.Tensor) -> torch.Tensor:
+        """
+        Predict future latent representations from context.
+        
+        Args:
+            context: Context latents of shape (batch, context_len, latent_dim)
+        
+        Returns:
+            Predicted future latents of shape (batch, horizon, latent_dim)
+        """
+        batch_size = context.shape[0]
+        
+        # Process context through RNN
+        # Output: (batch, context_len, hidden_dim)
+        # Hidden: tuple of (num_layers, batch, hidden_dim) for LSTM, or tensor for GRU
+        rnn_out, hidden = self.rnn(context)
+        
+        # Use last hidden state to predict future
+        if self.rnn_type == "LSTM":
+            # hidden is (h, c), we want h
+            last_hidden = hidden[0][-1, :, :]  # (batch, hidden_dim)
+        else:
+            # hidden is already the state
+            last_hidden = hidden[-1, :, :]  # (batch, hidden_dim)
+        
+        # Predict future embeddings
+        pred_flat = self.prediction_head(last_hidden)  # (batch, horizon * latent_dim)
+        pred = pred_flat.view(batch_size, self.horizon, self.latent_dim)
+        
+        return pred
 
 
 class NeuralPredictor(nn.Module):
@@ -208,7 +279,7 @@ class NeuralPredictor(nn.Module):
         else:
             raise ValueError(
                 f"Unknown predictor_type: {predictor_type}. "
-                "Currently only 'mlp' is supported."
+                "Supported types: 'mlp', 'rnn'"
             )
     
     def forward(self, context: torch.Tensor) -> torch.Tensor:
