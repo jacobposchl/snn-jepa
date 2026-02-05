@@ -149,7 +149,7 @@ def main(session_id: int):
     context_len = 5
     horizon = 5  # Predict 5 steps ahead to capture temporal patterns
     
-    encoder = NeuralEncoder(num_units, latent_dim, encoder_type="mlp").to(device)
+    encoder = NeuralEncoder(num_units, latent_dim, encoder_type="transformer").to(device)
     predictor = NeuralPredictor(latent_dim, horizon, context_len, predictor_type="rnn", hidden_dim=256, num_layers=2).to(device)
     
     optimizer = optim.Adam(

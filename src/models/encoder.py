@@ -1,8 +1,8 @@
 """
 Encoder model for creating a latent representation of binned neural data.
 
-Currently uses an MLP (Multi-Layer Perceptron) architecture, designed to be
-easily replaceable with a transformer in the future.
+Uses a Transformer architecture to capture temporal dependencies in neural
+population activity across time.
 
 The encoder takes binned spike counts and outputs compact latent representations
 suitable for downstream tasks like prediction (JEPA framework).
@@ -12,136 +12,131 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 
-class MLPEncoder(nn.Module):
+class TransformerEncoder(nn.Module):
     """
-    Multi-Layer Perceptron encoder for binned neural data.
+    Transformer encoder for binned neural data.
     
-    Processes neural population activity at each time step independently,
-    mapping from n_units-dimensional input to latent_dim-dimensional output.
+    Processes neural population activity across time using self-attention,
+    allowing each timestep to attend to all other timesteps in the sequence.
     
     Architecture:
-        Input (n_units) -> Hidden layers -> Output (latent_dim)
+        Input projection -> Positional encoding -> Transformer blocks -> Output projection
         
     Args:
         n_units: Number of input units (neurons) in the population
         latent_dim: Dimensionality of the latent representation
-        hidden_dims: List of hidden layer dimensions. If None, uses default
-                    architecture: [n_units * 2, n_units, n_units // 2]
-        activation: Activation function ('relu', 'gelu', 'tanh', 'elu')
-        dropout: Dropout probability (0.0 = no dropout)
-        use_batch_norm: Whether to use batch normalization
+        d_model: Internal dimensionality of transformer (default: 256)
+        n_heads: Number of attention heads (default: 8)
+        n_layers: Number of transformer layers (default: 4)
+        dim_feedforward: Dimension of feedforward network (default: 1024)
+        dropout: Dropout probability (default: 0.1)
+        max_seq_len: Maximum sequence length for positional encoding (default: 5000)
     """
     
     def __init__(
         self,
         n_units: int,
         latent_dim: int,
-        hidden_dims: Optional[list[int]] = None,
-        activation: str = "relu",
-        dropout: float = 0.0,
-        use_batch_norm: bool = False,
+        d_model: int = 256,
+        n_heads: int = 8,
+        n_layers: int = 4,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
+        max_seq_len: int = 5000,
     ):
         super().__init__()
         
         self.n_units = n_units
         self.latent_dim = latent_dim
+        self.d_model = d_model
         
-        # Default hidden architecture if not specified
-        if hidden_dims is None:
-            hidden_dims = [
-                n_units * 2,
-                n_units,
-                n_units // 2,
-            ]
+        # Input projection: map from n_units to d_model
+        self.input_projection = nn.Linear(n_units, d_model)
         
-        # Build layers
-        layers = []
-        dims = [n_units] + hidden_dims + [latent_dim]
+        # Learnable positional encoding
+        self.pos_embedding = nn.Parameter(torch.randn(1, max_seq_len, d_model))
         
-        for i in range(len(dims) - 1):
-            layers.append(nn.Linear(dims[i], dims[i + 1]))
-            
-            # Add activation, batch norm, and dropout (except for last layer)
-            if i < len(dims) - 2:  # Not the last layer
-                # Activation
-                if activation.lower() == "relu":
-                    layers.append(nn.ReLU())
-                elif activation.lower() == "gelu":
-                    layers.append(nn.GELU())
-                elif activation.lower() == "tanh":
-                    layers.append(nn.Tanh())
-                elif activation.lower() == "elu":
-                    layers.append(nn.ELU())
-                else:
-                    raise ValueError(f"Unknown activation: {activation}")
-                
-                # Batch normalization
-                if use_batch_norm:
-                    layers.append(nn.BatchNorm1d(dims[i + 1]))
-                
-                # Dropout
-                if dropout > 0.0:
-                    layers.append(nn.Dropout(dropout))
+        # Transformer encoder layers
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
         
-        self.mlp = nn.Sequential(*layers)
+        # Output projection: map from d_model to latent_dim
+        self.output_projection = nn.Linear(d_model, latent_dim)
+        
+        # Layer norm for output
+        self.output_norm = nn.LayerNorm(latent_dim)
+        
+        self.dropout = nn.Dropout(dropout)
+        
+        # Initialize output projection with small weights to avoid variance collapse
+        nn.init.xavier_normal_(self.output_projection.weight, gain=0.01)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through the encoder.
+        Forward pass through the transformer encoder.
         
         Args:
             x: Input tensor of shape:
-                - (batch, n_units) for single time step
+                - (batch, n_units) for single time step -> will be unsqueezed
                 - (batch, n_time_bins, n_units) for multiple time steps
-                - (batch, n_time_bins, n_units) will be processed per timestep
         
         Returns:
             Latent representations of shape:
                 - (batch, latent_dim) for single time step input
                 - (batch, n_time_bins, latent_dim) for multiple time steps
         """
-        original_shape = x.shape
+        squeeze_output = False
         
         # Handle 2D input (batch, n_units) - single time step
         if x.dim() == 2:
-            return self.mlp(x)
+            x = x.unsqueeze(1)  # (batch, 1, n_units)
+            squeeze_output = True
         
-        # Handle 3D input (batch, n_time_bins, n_units) - multiple time steps
-        elif x.dim() == 3:
-            batch_size, n_time_bins, n_units = x.shape
-            
-            # Reshape to (batch * n_time_bins, n_units) for processing
-            x_flat = x.view(-1, n_units)
-            
-            # Encode
-            latent_flat = self.mlp(x_flat)
-            
-            # Reshape back to (batch, n_time_bins, latent_dim)
-            latent = latent_flat.view(batch_size, n_time_bins, self.latent_dim)
-            
-            return latent
+        # Now x is (batch, n_time_bins, n_units)
+        batch_size, seq_len, n_units = x.shape
         
-        else:
-            raise ValueError(
-                f"Expected input of shape (batch, n_units) or "
-                f"(batch, n_time_bins, n_units), got {x.shape}"
-            )
+        # Input projection
+        x = self.input_projection(x)  # (batch, seq_len, d_model)
+        
+        # Add positional encoding
+        x = x + self.pos_embedding[:, :seq_len, :]
+        x = self.dropout(x)
+        
+        # Transformer encoding
+        x = self.transformer(x)  # (batch, seq_len, d_model)
+        
+        # Output projection
+        x = self.output_projection(x)  # (batch, seq_len, latent_dim)
+        x = self.output_norm(x)
+        
+        # Squeeze back to 2D if input was 2D
+        if squeeze_output:
+            x = x.squeeze(1)  # (batch, latent_dim)
+        
+        return x
 
 
 class NeuralEncoder(nn.Module):
     """
     High-level encoder wrapper for neural data.
     
-    This is the main interface for encoding binned neural data. Currently wraps
-    MLPEncoder, but designed to allow easy swapping to TransformerEncoder or
-    other architectures in the future.
+    This is the main interface for encoding binned neural data. Wraps
+    TransformerEncoder for capturing temporal dependencies.
     
     Args:
         n_units: Number of input units (neurons)
         latent_dim: Dimensionality of latent representation
-        encoder_type: Type of encoder ('mlp' or future types like 'transformer')
+        encoder_type: Type of encoder ('transformer')
         **kwargs: Additional arguments passed to the underlying encoder
     """
     
@@ -149,7 +144,7 @@ class NeuralEncoder(nn.Module):
         self,
         n_units: int,
         latent_dim: int,
-        encoder_type: str = "mlp",
+        encoder_type: str = "transformer",
         **kwargs,
     ):
         super().__init__()
@@ -158,12 +153,12 @@ class NeuralEncoder(nn.Module):
         self.latent_dim = latent_dim
         self.encoder_type = encoder_type
         
-        if encoder_type.lower() == "mlp":
-            self.encoder = MLPEncoder(n_units, latent_dim, **kwargs)
+        if encoder_type.lower() == "transformer":
+            self.encoder = TransformerEncoder(n_units, latent_dim, **kwargs)
         else:
             raise ValueError(
                 f"Unknown encoder_type: {encoder_type}. "
-                "Currently only 'mlp' is supported."
+                "Currently only 'transformer' is supported."
             )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -232,10 +227,11 @@ class NeuralEncoder(nn.Module):
         windows_flat = windows_tensor.view(-1, window_size, n_units)
         
         # Encode each window (output: n_windows * batch, latent_dim)
-        # For now, we average the window before encoding
-        window_means = windows_flat.mean(dim=1)  # (n_windows * batch, n_units)
-        encoded_flat = self.encoder(window_means)
+        # Output shape: (n_windows * batch, window_size, latent_dim)
+        encoded_flat = self.encoder(windows_flat)
         
+        # Take last timestep from each window: (n_windows * batch, latent_dim)
+        encoded_flat = encoded_flat[:, -1, :]
         # Reshape back: (n_windows, batch, latent_dim)
         encoded_windows = encoded_flat.view(n_windows, batch_size, self.latent_dim)
         
@@ -247,25 +243,3 @@ class NeuralEncoder(nn.Module):
     def get_latent_dim(self) -> int:
         """Return the dimensionality of the latent representation."""
         return self.latent_dim
-
-
-# Convenience function for creating encoders
-def create_encoder(
-    n_units: int,
-    latent_dim: int,
-    encoder_type: str,
-    **kwargs,
-) -> NeuralEncoder:
-    """
-    Factory function to create a neural encoder.
-    
-    Args:
-        n_units: Number of input units
-        latent_dim: Latent dimensionality
-        encoder_type: Type of encoder ('mlp' for now)
-        **kwargs: Additional arguments for the encoder
-    
-    Returns:
-        NeuralEncoder instance
-    """
-    return NeuralEncoder(n_units, latent_dim, encoder_type, **kwargs)
