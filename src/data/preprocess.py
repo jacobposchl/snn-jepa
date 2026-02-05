@@ -27,6 +27,8 @@ import numpy as np
 import pandas as pd
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass
+from pathlib import Path
+import pickle
 
 
 
@@ -205,6 +207,7 @@ class NeuropixelsPreprocessor:
         min_firing_rate: float = 0.1,
         max_isi_violations: float = 1.0,
         brain_areas: Optional[list] = None,
+        handler: Optional[Any] = None,
     ) -> 'NeuropixelsPreprocessor':
         """
         Filter units based on quality metrics.
@@ -221,6 +224,7 @@ class NeuropixelsPreprocessor:
             min_firing_rate: Keep units with firing_rate >= this (Hz)
             max_isi_violations: Keep units with isi_violations <= this (direct contamination measure)
             brain_areas: If specified, only keep units from these areas
+            handler: VBNDataHandler instance (required for brain_areas filtering)
             
         Returns:
             self for chaining
@@ -241,12 +245,24 @@ class NeuropixelsPreprocessor:
         if 'isi_violations' in units.columns:
             mask &= units['isi_violations'] <= max_isi_violations
         
-        # Brain area filter
-        if brain_areas is not None and 'ecephys_structure_acronym' in units.columns:
-            mask &= units['ecephys_structure_acronym'].isin(brain_areas)
-        
-        # Apply filter
+        # Apply quality filter first
         filtered_units = units[mask]
+        
+        # Brain area filter using metadata table
+        area_counts = {}
+        if brain_areas is not None and handler is not None:
+            metadata_units = handler.units_table
+            area_col = 'ecephys_structure_acronym' if 'ecephys_structure_acronym' in metadata_units.columns else 'structure_acronym'
+            
+            # Filter metadata table by brain areas
+            area_filtered = metadata_units[metadata_units[area_col].isin(brain_areas)]
+            
+            # Keep only units that are in the filtered metadata
+            filtered_units = filtered_units[filtered_units.index.isin(area_filtered.index)]
+            
+            # Get area counts from metadata table
+            area_counts = area_filtered[area_col].value_counts().to_dict()
+        
         kept_unit_ids = set(filtered_units.index)
         
         # Filter spike times to match kept units
@@ -258,14 +274,12 @@ class NeuropixelsPreprocessor:
         
         # Update metadata
         self.metadata.filtered_unit_count = len(filtered_units)
-        if 'ecephys_structure_acronym' in filtered_units.columns:
-            self.metadata.unit_areas = dict(
-                filtered_units['ecephys_structure_acronym'].value_counts()
-            )
+        self.metadata.unit_areas = area_counts
         
         self.metadata.operations.append('filter_units')
         print(f"✓ Unit filtering: {original_count} → {len(filtered_units)} units")
-        print(f"  Brain areas: {self.metadata.unit_areas}")
+        if brain_areas:
+            print(f"  Brain areas: {area_counts}")
         return self
 
     def get(self) -> Dict[str, Any]:
@@ -342,4 +356,95 @@ def slice_trial_windows(
     target_windows = trial_data[:, :, target_start:target_end]
 
     return context_windows, target_windows
+
+
+def get_or_create_dataset(
+    session_id: int,
+    preprocessed_dir: Path,
+    dataset_path: Optional[Path] = None,
+    data_dir: Optional[Path] = None,
+    brain_areas: Optional[list] = None,
+) -> dict:
+    """
+    Get existing dataset or create a new one.
+    
+    Args:
+        session_id: Session ID to process
+        preprocessed_dir: Directory where preprocessed datasets are stored
+        dataset_path: Optional path to existing preprocessed dataset
+        data_dir: Directory containing visual_behavior_neuropixels_data (default: inferred from this file's location)
+        brain_areas: Brain areas to filter (e.g., ['VISp', 'VISl']). If None, uses all areas.
+        
+    Returns:
+        Dictionary containing processed data
+    """
+    from .data_handler import VBNDataHandler
+    from ..utils.binning import bin_trial_aligned
+    
+    # If dataset path provided, load it
+    if dataset_path is not None:
+        if dataset_path.exists():
+            print(f"Loading dataset from {dataset_path}...")
+            with open(dataset_path, 'rb') as f:
+                return pickle.load(f)
+        else:
+            raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+    
+    dataset_file = preprocessed_dir / f"session_{session_id}.pkl"
+    
+    # Create new dataset
+    print(f"Creating new dataset for session {session_id}...")
+    
+    # Infer data_dir if not provided
+    if data_dir is None:
+        data_dir = Path(__file__).parent.parent.parent / "visual_behavior_neuropixels_data"
+    
+    handler = VBNDataHandler(str(data_dir))
+    session_data = handler.load_session(session_id)
+    
+    # Get filtered units
+    preprocessor = (NeuropixelsPreprocessor(session_data)
+        .validate_integrity()
+        .clean()
+        .filter_units(
+            min_snr=1.0,
+            max_isi_violations=1.0,
+            min_firing_rate=0.1,
+            brain_areas=brain_areas,
+            handler=handler,
+        ))
+    
+    processed = preprocessor.get()
+    
+    # Get stimulus change times from active behavior block only
+    stim = session_data.stimulus_presentations
+    active_stim = stim[stim['active'] == True].copy()
+    
+    # Get only stimulus changes (is_change == True)
+    change_events = active_stim[active_stim['is_change'] == True].copy()
+    change_times = change_events['start_time'].values
+    
+    print(f"Found {len(change_times)} stimulus changes in active block")
+    
+    # Create trial-aligned binned data
+    good_units = processed['units'].index.tolist()
+    trial_aligned = bin_trial_aligned(
+        spike_times_dict=session_data.spike_times,
+        event_times=change_times,
+        unit_ids=good_units,
+        bin_size_ms=10,  # 10ms bins for fine temporal resolution
+        pre_time_ms=0,    # Start at stimulus change
+        post_time_ms=400,  # Up to end of decision/motor prep phase
+    )
+    
+    # Store trial-aligned data in processed dict
+    processed['trial_aligned'] = trial_aligned
+    
+    # Save dataset to preprocessed directory
+    preprocessed_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Saving dataset to {dataset_file}...")
+    with open(dataset_file, 'wb') as f:
+        pickle.dump(processed, f)
+    
+    return processed
     

@@ -20,8 +20,7 @@ import pickle
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 # Imports
-from src.data.data_handler import VBNDataHandler
-from src.data.preprocess import NeuropixelsPreprocessor, slice_trial_windows
+from src.data.preprocess import NeuropixelsPreprocessor, slice_trial_windows, get_or_create_dataset
 from src.models.encoder import NeuralEncoder
 from src.models.predictor import NeuralPredictor
 from src.losses.lejepa import lejepa_loss
@@ -32,83 +31,6 @@ from src.plots.model_performance import plot_prediction_vs_actual
 from src.utils.binning import bin_trial_aligned
 
 
-def get_next_run_number(base_dir: Path) -> int:
-    """Get the next run number in the runs directory."""
-    runs = [d for d in base_dir.glob('run_*') if d.is_dir()]
-    if not runs:
-        return 1
-    max_run = max([int(d.name.split('_')[1]) for d in runs])
-    return max_run + 1
-
-
-def get_or_create_dataset(
-    dataset_path: Optional[Path],
-    session_id: int,
-    preprocessed_dir: Path,
-) -> dict:
-    """
-    Get existing dataset or create a new one.
-    
-    Args:
-        dataset_path: Optional path to existing preprocessed dataset
-        session_id: Session ID to process
-        preprocessed_dir: Directory where preprocessed datasets are stored
-        
-    Returns:
-        Dictionary containing processed data
-    """
-    # If dataset path provided, load it
-    if dataset_path is not None:
-        if dataset_path.exists():
-            print(f"Loading dataset from {dataset_path}...")
-            with open(dataset_path, 'rb') as f:
-                return pickle.load(f)
-        else:
-            raise FileNotFoundError(f"Dataset not found: {dataset_path}")
-    
-    dataset_file = preprocessed_dir / f"session_{session_id}.pkl"
-    
-    # Create new dataset
-    print(f"Creating new dataset for session {session_id}...")
-    data_dir = Path(__file__).parent / "visual_behavior_neuropixels_data"
-    handler = VBNDataHandler(str(data_dir))
-    session_data = handler.load_session(session_id)
-    
-    # Get filtered units
-    preprocessor = (NeuropixelsPreprocessor(session_data)
-        .validate_integrity()
-        .clean()
-        .filter_units(min_snr=1.0, max_isi_violations=1.0, min_firing_rate=0.1))
-    
-    processed = preprocessor.get()
-    
-    # Get stimulus change times
-    trials = session_data.trials
-    change_times = trials['change_time_no_display_delay'].dropna().values
-    
-    # Create trial-aligned binned data
-    good_units = processed['units'].index.tolist()
-    trial_aligned = bin_trial_aligned(
-        spike_times_dict=session_data.spike_times,
-        event_times=change_times,
-        unit_ids=good_units,
-        bin_size_ms=10,  # 10ms bins for fine temporal resolution
-        pre_time_ms=0,    # Start at stimulus change
-        post_time_ms=400,  # Up to end of decision/motor prep phase
-    )
-    
-    # Store trial-aligned data in processed dict
-    processed['trial_aligned'] = trial_aligned
-    
-    # Save dataset to preprocessed directory
-    preprocessed_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Saving dataset to {dataset_file}...")
-    with open(dataset_file, 'wb') as f:
-        pickle.dump(processed, f)
-    
-    return processed
-
-
 def main(
     session_id: int,
     dataset_dir: Optional[str] = None,
@@ -117,7 +39,11 @@ def main(
     # Setup runs directory
     runs_dir = Path(__file__).parent / "runs" / "proof_of_concept"
     runs_dir.mkdir(parents=True, exist_ok=True)
-    run_num = get_next_run_number(runs_dir)
+
+    # Get next run number
+    existing_runs = [d for d in runs_dir.glob('run_*') if d.is_dir()]
+    run_num = 1 if not existing_runs else max([int(d.name.split('_')[1]) for d in existing_runs]) + 1
+
     run_dir = runs_dir / f"run_{run_num}"
     run_dir.mkdir(parents=True, exist_ok=True)
     
@@ -127,9 +53,10 @@ def main(
     # Get or create dataset
     dataset_path = Path(dataset_dir) if dataset_dir else None
     processed = get_or_create_dataset(
-        dataset_path,
-        session_id,
-        preprocessed_dir,
+        session_id=session_id,
+        preprocessed_dir=preprocessed_dir,
+        dataset_path=dataset_path,
+        brain_areas=['VISp', 'VISl'],
     )
     
     print("Dataset ready")
@@ -196,14 +123,27 @@ def main(
     train_target_flat = train_target.permute(0, 2, 1).reshape(-1, num_units)
     train_all_flat = torch.cat([train_context_flat, train_target_flat], dim=0)
     
-    spike_mean = train_all_flat.mean(dim=0, keepdim=True)
-    spike_std = train_all_flat.std(dim=0, keepdim=True)
+    spike_mean = train_all_flat.mean(dim=0, keepdim=True)  # (1, n_units)
+    spike_std = train_all_flat.std(dim=0, keepdim=True)    # (1, n_units)
+    
+    # Reshape to (1, n_units, 1) for broadcasting with (batch, n_units, time)
+    spike_mean = spike_mean.unsqueeze(2)
+    spike_std = spike_std.unsqueeze(2)
+    
+    # Clip standard deviation to prevent division by near-zero (silent units)
+    spike_std = torch.clamp(spike_std, min=0.1)
     
     # Apply same normalization to both train and test
-    train_context = (train_context - spike_mean.unsqueeze(0)) / (spike_std.unsqueeze(0) + 1e-8)
-    train_target = (train_target - spike_mean.unsqueeze(0)) / (spike_std.unsqueeze(0) + 1e-8)
-    test_context = (test_context - spike_mean.unsqueeze(0)) / (spike_std.unsqueeze(0) + 1e-8)
-    test_target = (test_target - spike_mean.unsqueeze(0)) / (spike_std.unsqueeze(0) + 1e-8)
+    train_context = (train_context - spike_mean) / spike_std
+    train_target = (train_target - spike_mean) / spike_std
+    test_context = (test_context - spike_mean) / spike_std
+    test_target = (test_target - spike_mean) / spike_std
+    
+    # Clip extreme outliers after normalization to prevent instability
+    train_context = torch.clamp(train_context, -10, 10)
+    train_target = torch.clamp(train_target, -10, 10)
+    test_context = torch.clamp(test_context, -10, 10)
+    test_target = torch.clamp(test_target, -10, 10)
     
     print(f"\nNormalized train context shape: {train_context.shape}")
     print(f"  Min: {train_context.min().item():.6f} | Max: {train_context.max().item():.6f}")
@@ -265,7 +205,7 @@ def main(
             # Predict full target sequence
             z_predicted = predictor(z_context)  # (batch, horizon, latent_dim)
             
-            # Compare FULL sequences by flattening temporal dimension
+            # Compare full sequences by flattening temporal dimension
             z_predicted_flat = z_predicted.reshape(z_predicted.shape[0], -1)
             z_target_flat = z_target.reshape(z_target.shape[0], -1)
             z_context_flat = z_context[:, -1, :]  # Last context timestep for SIGReg
@@ -333,7 +273,7 @@ def main(
         z_pred_flat = z_pred_test.reshape(z_pred_test.shape[0], -1)
         
         # Get all embeddings for visualization (from training data)
-        batch_contexts = train_context[::10].permute(0, 2, 1)  # Subsample for memory
+        batch_contexts = train_context[::10].permute(0, 2, 1)
         all_embeddings = encoder(batch_contexts)[:, -1, :]  # Use last timestep
     
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
@@ -344,7 +284,7 @@ def main(
     plot_prediction_vs_actual(z_pred_flat, z_target_flat, ax=axes[1, 1])
     
     plt.tight_layout()
-    plt.savefig('poc_results.png', dpi=150, bbox_inches='tight')
+    plt.savefig(run_dir / 'poc_results.png', dpi=150, bbox_inches='tight')
     
     # Compute final test performance
     with torch.no_grad():
@@ -377,7 +317,7 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train LE-JEPA model on single Visual Behavior Neuropixels session")
-    parser.add_argument("session_id", type=int, help="Ecephys session ID to train on")
+    parser.add_argument("session_id", type=int, nargs='?', help="Ecephys session ID to train on (optional if --dataset-dir provided)")
     parser.add_argument(
         "--dataset-dir",
         type=str,
@@ -386,6 +326,14 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     
-    main(args.session_id, args.dataset_dir)
+    if args.session_id is None:
+        if args.dataset_dir is None:
+            parser.error("Either session_id or --dataset-dir must be provided")
+        import re
+        match = re.search(r'session_(\d+)', args.dataset_dir)
+        if match:
+            args.session_id = int(match.group(1))
+        else:
+            parser.error("Could not extract session_id from dataset path. Please provide session_id explicitly.")
     
-
+    main(args.session_id, args.dataset_dir)
