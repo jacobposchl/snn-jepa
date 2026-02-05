@@ -8,8 +8,7 @@ Pipeline progression:
     1. validate_integrity() - Check data completeness and format
     2. clean() - Remove outlier spikes, handle gaps
     3. filter_units() - Apply quality metrics (SNR, ISI violations, firing rate)
-    4. create_windows() - Bin spikes into time windows aligned to events
-    5. get() - Return processed data dict
+    4. get() - Return processed data dict
 
 Each method returns self for chaining. Output from get() is model-ready.
 
@@ -21,7 +20,6 @@ Example usage:
         .validate_integrity()
         .clean()
         .filter_units()
-        .create_windows(window_size_ms=500, stride_ms=100)
         .get())
 """
 
@@ -30,7 +28,6 @@ import pandas as pd
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass
 
-from src.utils.window import create_context_target_windows
 
 
 @dataclass
@@ -270,72 +267,7 @@ class NeuropixelsPreprocessor:
         print(f"✓ Unit filtering: {original_count} → {len(filtered_units)} units")
         print(f"  Brain areas: {self.metadata.unit_areas}")
         return self
-    
-    def create_windows(
-        self,
-        window_size_ms: float = 500,
-        stride_ms: float = 100,
-        align_to: str = 'stimulus_change',
-    ) -> 'NeuropixelsPreprocessor':
-        """
-        Create sliding windows of spike counts aligned to behavioral events.
-        
-        Bins spike times into fixed-duration windows and aligns them to either
-        stimulus changes or trial starts. Uses display lag-corrected times.
-        
-        Args:
-            window_size_ms: Window duration in milliseconds
-            stride_ms: Stride between windows in milliseconds
-            align_to: Alignment event:
-                'stimulus_change': Align to stimulus change onsets (requires stimulus_presentations)
-                'trial_start': Align to trial onsets (requires trials)
-            
-        Returns:
-            self for chaining
-        """
-        spike_times = self.data['spike_times']
-        trials = self.data.get('trials')
-        stimulus = self.data.get('stimulus_presentations')
-        
-        window_size_s = window_size_ms / 1000.0
-        stride_s = stride_ms / 1000.0
-        
-        # Get alignment times based on event type (using display-corrected times)
-        if align_to == 'stimulus_change' and stimulus is not None:
-            align_times = stimulus['start_time'].values
-        elif align_to == 'trial_start' and trials is not None:
-            align_times = trials['start_time'].values
-        else:
-            raise ValueError(
-                f"Cannot align to '{align_to}': "
-                f"stimulus_change requires stimulus_presentations, "
-                f"trial_start requires trials"
-            )
-        
-        # Create windows for each unit
-        windows = {}
-        for unit_id, times in spike_times.items():
-            unit_windows = []
-            for align_time in align_times:
-                start = align_time
-                end = align_time + window_size_s
-                spikes_in_window = np.sum((times >= start) & (times < end))
-                unit_windows.append(spikes_in_window)
-            windows[unit_id] = np.array(unit_windows)
-        
-        self.data['windows'] = windows
-        self.data['window_metadata'] = {
-            'window_size_ms': window_size_ms,
-            'stride_ms': stride_ms,
-            'align_to': align_to,
-            'num_windows': len(align_times),
-        }
-        
-        self.metadata.windows_created = len(align_times)
-        self.metadata.operations.append('create_windows')
-        print(f"✓ Created {len(align_times)} windows ({window_size_ms}ms @ {stride_ms}ms stride)")
-        return self
-    
+
     def get(self) -> Dict[str, Any]:
         """
         Return processed data ready for downstream analysis.
@@ -368,3 +300,46 @@ class NeuropixelsPreprocessor:
             'metadata': self.metadata,
             'window_metadata': self.data.get('window_metadata'),
         }
+
+def slice_trial_windows(
+    trial_data: np.ndarray,
+    context_start: int,
+    context_end: int,
+    target_start: int,
+    target_end: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Slice a single fixed context/target pair per trial.
+
+    Args:
+        trial_data: Trial-aligned binned data, shape (n_trials, n_units, n_time_bins)
+        context_start: Start index for context window (inclusive)
+        context_end: End index for context window (exclusive)
+        target_start: Start index for target window (inclusive)
+        target_end: End index for target window (exclusive)
+
+    Returns:
+        Tuple of (context_windows, target_windows):
+            - context_windows: shape (n_trials, n_units, context_size)
+            - target_windows: shape (n_trials, n_units, target_size)
+    """
+    if trial_data.ndim != 3:
+        raise ValueError(
+            f"Expected trial_data with shape (n_trials, n_units, n_time_bins), got {trial_data.shape}"
+        )
+
+    n_time_bins = trial_data.shape[2]
+    if not (0 <= context_start < context_end <= n_time_bins):
+        raise ValueError(
+            f"Invalid context window: [{context_start}, {context_end}) for {n_time_bins} bins"
+        )
+    if not (0 <= target_start < target_end <= n_time_bins):
+        raise ValueError(
+            f"Invalid target window: [{target_start}, {target_end}) for {n_time_bins} bins"
+        )
+
+    context_windows = trial_data[:, :, context_start:context_end]
+    target_windows = trial_data[:, :, target_start:target_end]
+
+    return context_windows, target_windows
+    
