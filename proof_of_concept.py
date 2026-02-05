@@ -157,9 +157,9 @@ def main(
     print("\nCreating context-target windows...")
     
     # With pre_time=0ms, post_time=400ms, bin_size=10ms:
-    # - Context bins: 5-19 (50-200ms)
+    # - Context bins: 0-19 (0-200ms)
     # - Target bins: 20-39 (200-400ms)
-    context_start, context_end = 5, 20
+    context_start, context_end = 0, 20
     target_start, target_end = 20, 40
     context_size = context_end - context_start
     target_size = target_end - target_start
@@ -255,8 +255,8 @@ def main(
         for i in range(0, n_train_windows, batch_size):
             batch_indices = indices[i:min(i + batch_size, n_train_windows)]
             
-            context_batch = train_context[batch_indices]  # (batch, n_units, context_len)
-            target_batch = train_target[batch_indices]    # (batch, n_units, horizon)
+            context_batch = train_context[batch_indices].permute(0, 2, 1)  # (batch, context_len, n_units)
+            target_batch = train_target[batch_indices].permute(0, 2, 1)    # (batch, horizon, n_units)
             
             # Encode full sequences
             z_context = encoder(context_batch)  # (batch, context_len, latent_dim)
@@ -292,8 +292,8 @@ def main(
         encoder.eval()
         predictor.eval()
         with torch.no_grad():
-            test_context_enc = encoder(test_context)
-            test_target_enc = encoder(test_target)
+            test_context_enc = encoder(test_context.permute(0, 2, 1))
+            test_target_enc = encoder(test_target.permute(0, 2, 1))
             test_pred = predictor(test_context_enc)
             
             test_pred_flat = test_pred.reshape(test_pred.shape[0], -1)
@@ -324,8 +324,8 @@ def main(
     
     with torch.no_grad():
         # Evaluate on full test set
-        z_context_test = encoder(test_context)
-        z_target_test = encoder(test_target)
+        z_context_test = encoder(test_context.permute(0, 2, 1))
+        z_target_test = encoder(test_target.permute(0, 2, 1))
         z_pred_test = predictor(z_context_test)
         
         # Flatten for comparison
@@ -333,7 +333,7 @@ def main(
         z_pred_flat = z_pred_test.reshape(z_pred_test.shape[0], -1)
         
         # Get all embeddings for visualization (from training data)
-        batch_contexts = train_context[::10]  # Subsample for memory
+        batch_contexts = train_context[::10].permute(0, 2, 1)  # Subsample for memory
         all_embeddings = encoder(batch_contexts)[:, -1, :]  # Use last timestep
     
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
@@ -358,7 +358,7 @@ def main(
     print(f"Units: {num_units} | Trials: {n_trials} (train: {n_train}, test: {n_trials-n_train})")
     print(f"Windows: {n_train_windows} train, {n_test_windows} test")
     print(f"Architecture: {num_units}→{latent_dim} latent (RNN predictor)")
-    print(f"  Context: {context_len} bins (50-200ms, feature integration)")
+    print(f"  Context: {context_len} bins (0-200ms, full early sensory+integration)")
     print(f"  Target: {horizon} bins (200-400ms, decision/motor prep)")
     print(f"  Bin size: {trial_aligned['bin_size_ms']:.1f}ms")
     print(f"\nTraining:")
