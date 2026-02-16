@@ -92,13 +92,11 @@ class SNNEncoder(nn.Module):
         latent = self.latent_out(hidden_mean) # (batch, latent_dim)
         latent = self.out_norm(latent)
 
-        firing_rates = torch.stack(
-            [
+        firing_rates = [
                 torch.stack(spike_records[l], dim=0).mean(dim=0)
                 for l in range(len(self.lif_layers))
-            ],
-            dim=0,
-        ) # (n_layers, batch, hidden_dim)
+        ]
+        # (n_layers, batch, hidden_dim)
 
         spikes = [
             torch.stack(spike_records[l], dim=0)
@@ -130,6 +128,10 @@ class SNNEncoder(nn.Module):
         """
 
         firing_rates = metrics["firing_rates"]  # (n_layers, batch, hidden_dim)
-        penalties = firing_rates - self.homeostatic_target
+        
+        penalties = []
+        for f_rate in firing_rates:
+            deviation = f_rate - self.homeostatic_target
+            penalties.append((deviation ** 2).mean())
         #how far firing rate is from target (positive = too much, negative = too small)
-        return (penalties ** 2).mean()
+        return torch.stack(penalties).mean()
