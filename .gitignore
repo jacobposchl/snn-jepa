@@ -1,8 +1,21 @@
-.venv/
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*/__pycache__/*
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Local data (Keep these out of GitHub)
 visual_behavior_neuropixels_data/
-temp_tests/
-out/
-.github/
-documentations/
-runs/
 preprocessed/
+runs/
+.venv/
+.github/
+out/
+temp_tests/
+
+# macOS system files
+.DS_Store
