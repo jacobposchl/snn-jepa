@@ -20,7 +20,7 @@ class SNNEncoder(nn.Module):
         timesteps: int, #for each forward pass
         beta: float = 0.5, #membrane decay rate
         threshold: float = 1.0, #threshold at which neuron fires spike
-        homeostatic_target: float = 0.01, #avg firing rate we want
+        homeostatic_target: float = 0.05, #avg firing rate we want (realistic for ~10ms bins)
     ):
         super().__init__()
         
@@ -62,9 +62,14 @@ class SNNEncoder(nn.Module):
         """
 
         # run SNN model over "timesteps"
-        if spike_input.dim() == 3 and spike_input.shape[1] == self.timesteps:
-            #rearrange dims from (batch,timesteps,input_dim) to (timesteps,batch,input_dim)
-            spike_input = spike_input.permute(1, 0, 2)
+        # Input can be (batch, timesteps, input_dim) or (batch, input_dim, timesteps)
+        if spike_input.dim() == 3:
+            if spike_input.shape[1] == self.timesteps:
+                # (batch, timesteps, input_dim) -> (timesteps, batch, input_dim)
+                spike_input = spike_input.permute(1, 0, 2)
+            elif spike_input.shape[2] == self.timesteps:
+                # (batch, input_dim, timesteps) -> (timesteps, batch, input_dim)
+                spike_input = spike_input.permute(2, 0, 1)
         
         t_steps, batch_size, _ = spike_input.shape
 
@@ -84,13 +89,20 @@ class SNNEncoder(nn.Module):
                 mem_states[l] = updated_mem #use updated membrane in next timestep
                 spike_records[l].append(spk) #save for firing rate calc
                 x = spk #pass spikes as input to the next layer
-        
-        hidden_acc.append(x) #x is now last-layer spikes
+            
+            hidden_acc.append(x) #x is now last-layer spikes at this timestep
 
-        #after time-loop, create final latent output
-        hidden_mean = torch.stack(hidden_acc, dim=0).mean(dim=0)
-        latent = self.latent_out(hidden_mean) # (batch, latent_dim)
-        latent = self.out_norm(latent)
+        #after time-loop, create latent output per timestep
+        hidden_stacked = torch.stack(hidden_acc, dim=0)  # (T, batch, hidden_dim)
+        
+        # Apply latent projection to each timestep
+        latent_per_timestep = []
+        for t in range(t_steps):
+            latent_t = self.latent_out(hidden_stacked[t])  # (batch, latent_dim)
+            latent_t = self.out_norm(latent_t)
+            latent_per_timestep.append(latent_t)
+        
+        latent = torch.stack(latent_per_timestep, dim=1)  # (batch, T, latent_dim)
 
         firing_rates = [
                 torch.stack(spike_records[l], dim=0).mean(dim=0)
