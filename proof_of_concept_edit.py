@@ -6,15 +6,16 @@ if prediction loss & SIGReg loss decreases
 
 """
 
+import os
+import sys
+
+# Use headless backend for plotting
+os.environ["MPLBACKEND"] = "Agg"
 import argparse
 import pickle
-import sys
 from pathlib import Path
 from typing import Optional
 
-import matplotlib
-
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
