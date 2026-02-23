@@ -1,2 +1,0 @@
-# SNN-JEPA source package
-

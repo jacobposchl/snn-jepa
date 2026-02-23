@@ -25,21 +25,16 @@ import torch.optim as optim
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 # Imports
-from src.data.preprocess import (
-    NeuropixelsPreprocessor,
-    get_or_create_dataset,
-    slice_trial_windows,
-)
-from src.losses.distillation import DistillationLoss
-from src.losses.lejepa import lejepa_loss
-from src.models.encoder import NeuralEncoder
-from src.models.predictor import NeuralPredictor
-from src.models.snn import SNNEncoder
-from src.plots.latent_space import plot_prediction_accuracy
-from src.plots.model_performance import plot_prediction_vs_actual
-from src.plots.neural_activity import plot_spike_count_distribution
-from src.plots.training import plot_loss_curves
-from src.utils.binning import bin_trial_aligned
+from jepsyn.data.preprocess import NeuropixelsPreprocessor, get_or_create_dataset, slice_trial_windows
+from jepsyn.losses.distillation import DistillationLoss
+from jepsyn.losses.lejepa import lejepa_loss
+from jepsyn.models.encoder import NeuralEncoder
+from jepsyn.models.predictor import NeuralPredictor
+from jepsyn.models.snn import SNNEncoder
+from jepsyn.plots.latent_space import plot_prediction_accuracy
+from jepsyn.plots.model_performance import plot_prediction_vs_actual
+from jepsyn.plots.neural_activity import plot_spike_count_distribution
+from jepsyn.plots.training import plot_loss_curves
 
 
 def setup_data(session_id: int, dataset_dir: Optional[str] = None):
