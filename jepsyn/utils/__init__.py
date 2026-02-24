@@ -5,3 +5,7 @@ from .binning import (
     get_time_bins,
 )
 
+from .config_helper import (
+    verify_config
+)
+

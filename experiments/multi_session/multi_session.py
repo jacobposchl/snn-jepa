@@ -6,88 +6,277 @@ a Spiking Neural Network Model
 
 # Imports
 import argparse
+from pathlib import Path
+from typing import Any, Dict, Tuple
+from sklearn.model_selection import train_test_split
 import pandas as pd
-import yaml
-from Lib import Path 
+import yaml 
+
+from jepsyn.utils import verify_config
 
 
-# Validate Configuration
-def verify_config(config_path : Path) -> dict:
+def load_and_prepare_data(config: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     """
-    Should check configuration yaml file for inconsistincies
-    Should verify it contains the necessary information
-    """
-
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-    except:
-        return ValueError, "Error Opening Configuration File, check path..."
+    Load and prepare multi-session neural data for training and testing.
     
-    # Check configuration file data
-
-    return config
-
-# Import and Validate Dataset
-
-# Train Teacher on Train Set
-def train_lejepa(config: yaml):
-    pass
-
-# Test Teacher on Test Set
-def test_lejepa(config: yaml):
-    pass
-
-# Train SNN on Train Set
-def train_snn(config: yaml):
-    pass
-
-# Test SNN on Test Set
-def test_snn(config: yaml):
-    pass
-
-# Output Results Dataset
-def output_results(stage: str, train = bool, data = pd.DataFrame):
+    Args:
+        config: Configuration dictionary containing data_path and split parameters
+    
+    Returns:
+        Tuple of (train_data, val_data, test_data)
+        
+    Expected Dataset Format:
+        Columns:
+            - session_id (int): Unique identifier for each recording session
+            - window_id (int): Unique identifier for each temporal window
+            - window_start_ms (int): Window start time in milliseconds
+            - window_end_ms (int): Window end time in milliseconds
+            - events_units (np.array): Array of unit indices for each spike event
+            - events_times_ms (np.array): Spike times relative to window start (ms)
+            - stimulus (str): JSON-encoded stimulus events with timestamps relative to window start
+            - behavior (str): JSON-encoded behavioral events with timestamps relative to window start
+        
+        Each row corresponds to a single temporal window of neural activity.
+    
+    Validation Checks:
+        - No duplicate window_ids with conflicting window times
+        - Equal length arrays for events_units and events_times_ms
+        - Valid JSON format for stimulus and behavior columns
     """
-    Should print results summary and save figures of data
+    # Load dataset from CSV
+    data_path = config.get("data_path")
+    if not data_path:
+        raise ValueError("data_path not found in configuration")
+    
+    dataset = pd.read_csv(data_path)
+    
+    # Validate data integrity
+    print("Validating dataset integrity...")
+
+    # Check for duplicate window_ids with conflicting timestamps
+    duplicate_check = dataset.groupby('window_id').agg({
+        'window_start_ms': 'nunique',
+        'window_end_ms': 'nunique'
+    })
+    conflicts = duplicate_check[(duplicate_check['window_start_ms'] > 1) | 
+                                (duplicate_check['window_end_ms'] > 1)]
+    if not conflicts.empty:
+        raise ValueError(
+            f"Found {len(conflicts)} window_ids with conflicting timestamps: "
+            f"{conflicts.index.tolist()[:5]}..."
+        )
+
+    # Verify events_units and events_times_ms have matching lengths
+    length_mismatches = dataset[
+        dataset['events_units'].apply(len) != dataset['events_times_ms'].apply(len)
+    ]
+    if not length_mismatches.empty:
+        raise ValueError(
+            f"Found {len(length_mismatches)} rows where events_units and events_times_ms "
+            f"have different lengths (window_ids: {length_mismatches['window_id'].tolist()[:5]})"
+        )
+
+    # Validate JSON format for stimulus and behavior columns
+    import json
+    invalid_json = []
+    for idx, row in dataset.iterrows():
+        try:
+            json.loads(row['stimulus'])
+            json.loads(row['behavior'])
+        except (json.JSONDecodeError, TypeError) as e:
+            invalid_json.append((idx, row['window_id']))
+            if len(invalid_json) >= 5:  # Only collect first 5 examples
+                break
+
+    if invalid_json:
+        raise ValueError(
+            f"Found invalid JSON in {len(invalid_json)} rows: "
+            f"window_ids {[w for _, w in invalid_json]}"
+        )
+
+    print("Passed Basic Validation Checks")
+    
+    # Extract split configuration
+    train_size = config.get("data", {}).get("train_split")
+    val_size = config.get("data", {}).get("val_split")
+    test_size = config.get("data", {}).get("test_split")
+    random_state = config.get("data", {}).get("random_state")
+    
+    # Split data by session_id to prevent data leakage across sessions
+    unique_sessions = dataset["session_id"].unique()
+    
+    # First split: separate test set
+    train_val_sessions, test_sessions = train_test_split(
+        unique_sessions,
+        test_size=test_size,
+        random_state=random_state
+    )
+    
+    # Second split: separate train and validation sets
+    train_sessions, val_sessions = train_test_split(
+        train_val_sessions,
+        test_size=val_size / (train_size + val_size),
+        random_state=random_state
+    )
+    
+    # Create dataset splits
+    train_data = dataset[dataset["session_id"].isin(train_sessions)]
+    val_data = dataset[dataset["session_id"].isin(val_sessions)]
+    test_data = dataset[dataset["session_id"].isin(test_sessions)]
+    
+    print(f"Train: {len(train_data)} windows ({len(train_sessions)} sessions)")
+    print(f"Val:   {len(val_data)} windows ({len(val_sessions)} sessions)")
+    print(f"Test:  {len(test_data)} windows ({len(test_sessions)} sessions)")
+    
+    return train_data, val_data, test_data
+
+
+def train_lejepa(config: Dict[str, Any], train_data: Any, val_data: Any) -> Tuple[Any, pd.DataFrame]:
     """
+    Train LeJEPA teacher model on multi-session neural data.
+    Includes validation during training.
+    
+    Args:
+        config: Configuration dictionary
+        train_data: Training dataset
+        val_data: Validation dataset
+        
+    Returns:
+        Tuple of (trained_model, training_metrics_df)
+    """
+    # TODO: Implement LeJEPA training
+    # - Initialize model from config
+    # - Training loop with validation
+    # - Save checkpoints
+    # - Return trained model and metrics
+    pass
+
+
+def distill_snn(config: Dict[str, Any], teacher_model: Any, 
+                train_data: Any, val_data: Any) -> Tuple[Any, pd.DataFrame]:
+    """
+    Distill LeJEPA teacher into spiking neural network student.
+    Includes validation during distillation.
+    
+    Args:
+        config: Configuration dictionary
+        teacher_model: Trained LeJEPA model
+        train_data: Training dataset
+        val_data: Validation dataset
+        
+    Returns:
+        Tuple of (trained_snn, distillation_metrics_df)
+    """
+    # TODO: Implement SNN distillation
+    # - Initialize SNN from config
+    # - Distillation training loop with validation
+    # - Save checkpoints
+    # - Return trained SNN and metrics
+    pass
+
+
+def evaluate_model(model: Any, test_data: Any, stage: str) -> pd.DataFrame:
+    """
+    Evaluate a trained model on test data.
+    
+    Args:
+        model: Trained model (LeJEPA or SNN)
+        test_data: Test dataset
+        stage: Model stage name ("LeJEPA" or "SNN")
+        
+    Returns:
+        DataFrame containing evaluation metrics
+    """
+    # TODO: Implement evaluation
+    # - Run inference on test data
+    # - Compute metrics (reconstruction, prediction, etc.)
+    # - Return results dataframe
+    pass
+
+
+def save_results(stage: str, phase: str, metrics: pd.DataFrame, config: Dict[str, Any]) -> None:
+    """
+    Save results, metrics, and generate plots.
+    
+    Args:
+        stage: Experiment stage ("LeJEPA" or "SNN")
+        phase: Training phase ("training", "validation", "test")
+        metrics: DataFrame containing metrics
+        config: Configuration dictionary
+    """
+    # TODO: Implement results output
+    # - Save metrics to CSV
+    # - Generate plots (training curves, latent space, etc.)
+    # - Save figures to output directory
     pass
 
 
 # Run Experiment
-def main(config_path : Path):
-
+def main(config_path: Path) -> None:
+    """
+    Main experiment runner that orchestrates the full pipeline.
+    
+    Args:
+        config_path: Path to the configuration YAML file
+    """
+    # Verify configuration
+    print("=" * 60)
     print("Verifying Configuration")
     config = verify_config(config_path)
     print(f"Configuration Verified. Using: {config_path}")
-
-
-    print("Training LeJEPA Model")
-    jepa_training_data = train_lejepa(config, )
-    output_results(stage = "JEPA", train = True, data = jepa_training_data)
-
-    print("Testing LeJEPA")
-    jepa_testing_data = test_lejepa(config, )
-    output_results(stage = "JEPA", train = False, data = jepa_testing_data)
-
-    print("Distilling into SNN")
-    snn_training_data = train_snn(config, )
-    output_results(stage = "SNN", train = True, data = snn_training_data)
-
-    print("Testing Distilled SNN")
-    snn_testing_data = test_snn(config, )
-    output_results(stage = "SNN", train = False, data = snn_testing_data)
     
+    # Load and prepare data
+    print("\n" + "=" * 60)
+    print("Loading and Preparing Data")
+    train_data, val_data, test_data = load_and_prepare_data(config)
+    print("Data loaded successfully")
+    
+    # Train LeJEPA teacher model
+    print("\n" + "=" * 60)
+    print("Training LeJEPA Teacher Model")
+    jepa_model, jepa_train_metrics = train_lejepa(config, train_data, val_data)
+    save_results(stage="LeJEPA", phase="training", metrics=jepa_train_metrics, config=config)
+    print("LeJEPA training complete")
+    
+    # Evaluate LeJEPA on test set
+    print("\n" + "=" * 60)
+    print("Evaluating LeJEPA on Test Set")
+    jepa_test_metrics = evaluate_model(jepa_model, test_data, stage="LeJEPA")
+    save_results(stage="LeJEPA", phase="test", metrics=jepa_test_metrics, config=config)
+    print("LeJEPA evaluation complete")
+    
+    # Distill into SNN student model
+    print("\n" + "=" * 60)
+    print("Distilling into Spiking Neural Network")
+    snn_model, snn_train_metrics = distill_snn(config, jepa_model, train_data, val_data)
+    save_results(stage="SNN", phase="distillation", metrics=snn_train_metrics, config=config)
+    print("SNN distillation complete")
+    
+    # Evaluate SNN on test set
+    print("\n" + "=" * 60)
+    print("Evaluating Distilled SNN on Test Set")
+    snn_test_metrics = evaluate_model(snn_model, test_data, stage="SNN")
+    save_results(stage="SNN", phase="test", metrics=snn_test_metrics, config=config)
+    print("SNN evaluation complete")
+    
+    print("\n" + "=" * 60)
+    print("Multi-Session Experiment Complete!")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description = "Arguments for running a multi-session experiment.")
-    parser.add_argument("config_path", help = "Input Configuration File Path for Experiment Settings")
+    parser = argparse.ArgumentParser(
+        description="Run multi-session neural experiment with LeJEPA and SNN distillation."
+    )
+    parser.add_argument(
+        "config_path",
+        type=Path,
+        help="Path to configuration YAML file for experiment settings"
+    )
     args = parser.parse_args()
-
-    config_path = args.config_path
     
-    print("Starting Multi Session Experiment")
-    main(config_path=config_path)
+    print("Starting Multi-Session Experiment")
+    print("=" * 60)
+    main(config_path=args.config_path)
 
 

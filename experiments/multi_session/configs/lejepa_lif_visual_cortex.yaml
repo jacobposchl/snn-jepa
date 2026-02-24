@@ -1,4 +1,18 @@
 # Paths
 data_path: 
-log_dir:
+results_out_path:
+plots_out_path:  
 
+
+# Data Split Sizes
+data:
+  train_split:
+  test_split:
+  val_split:
+  random_state:
+
+# Training:
+epochs:
+batch_size: 
+
+# 
