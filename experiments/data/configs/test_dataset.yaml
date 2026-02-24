@@ -1,0 +1,22 @@
+data_path: ./datasets/test_windows.csv
+
+dataset_config:
+  cache_dir: ../../../visual_behavior_neuropixels_data/
+
+  # Small set of sessions for smoke-testing the pipeline.
+  # You can replace these with any valid ecephys session IDs.
+  session_ids: [1064415305]
+
+  # Limit to primary visual cortex areas; set to [] or omit
+  # to include all available areas.
+  brain_areas: ["VISp", "VISl"]
+
+  quality:
+    min_snr: 1.0
+    min_firing_rate: 0.1
+    max_isi_violations: 1.0
+
+  windowing:
+    bin_size_ms: 10
+    window_size_ms: 400
+    stride_ms: 400
