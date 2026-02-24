@@ -13,6 +13,7 @@ import pandas as pd
 import yaml 
 
 from jepsyn.utils import verify_config
+from jepsyn.models import NeuralEncoder
 
 
 def load_and_prepare_data(config: Dict[str, Any]) -> Tuple[Any, Any, Any]:
@@ -145,8 +146,23 @@ def train_lejepa(config: Dict[str, Any], train_data: Any, val_data: Any) -> Tupl
         Tuple of (trained_model, training_metrics_df)
     """
     # TODO: Implement LeJEPA training
+
     # - Initialize model from config
+    enc_model = config.encoder_type
+    n_units = config.n_units
+    latent_dim = config.latent_dim
+
+    # Inputs probably need fixing
+    encoder = NeuralEncoder(n_units = n_units, latent_dim = latent_dim, encoder_type = enc_model)
+    
     # - Training loop with validation
+    
+    # Might need adjusting
+    # 1. Tokenize data (unit_id, time)
+    # 2. Encode tokenized data
+    # 3. Evaluate model
+    # val_results = evaluate_model(model = , test_data = val_data, stage = "LeJEPA")
+
     # - Save checkpoints
     # - Return trained model and metrics
     pass

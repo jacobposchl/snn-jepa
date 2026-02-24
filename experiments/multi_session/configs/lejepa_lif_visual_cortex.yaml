@@ -15,4 +15,9 @@ data:
 epochs:
 batch_size: 
 
-# 
+# Model
+model:
+  encoder_type:
+  n_units:
+  latent_dim:
+   
