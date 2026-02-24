@@ -1,77 +1,78 @@
-# SNN-JEPA: Spiking Neural Networks - Joint-Embedding Predictive Architecture
+## SNN-JEPA: Spiking Neural Networks - Joint-Embedding Predictive Architecture
 
-SNN-JEPA is a self-supervised learning framework designed to learn compact, informative representations of high-dimensional neural population activity. It combines **Spiking Neural Networks (SNNs)** with the **Joint-Embedding Predictive Architecture (JEPA)** to model the temporal dynamics of brain activity recorded via Neuropixels.
+SNN-JEPA is a self-supervised learning framework for learning compact, informative representations of high-dimensional neural population activity. It combines **Spiking Neural Networks (SNNs)** with a **Joint-Embedding Predictive Architecture (JEPA)** to model the temporal dynamics of brain activity recorded via Neuropixels.
 
-## 🧠 Key Features
+### Key components
 
-- **Spiking Neural Encoders**: Leverages `snntorch` to process raw neural spike trains, maintaining the temporal precision and biological realism of spiking dynamics.
-- **Joint-Embedding Predictive Architecture (JEPA)**: Learns by predicting future latent states from past context, avoiding the need for expensive manual labels.
-- **Isotropic Gaussian Regularization (SIGReg)**: Employs Sketched Isotropic Gaussian Regularization to prevent latent space collapse and ensure representations are well-distributed.
-- **Multi-Modal Encoders**: Supports both SNNs and Transformer-based encoders for neural data.
-- **Neuropixels Integration**: Built-in support for Allen Institute Visual Behavior Neuropixels datasets.
+- **`jepsyn/models`**: `NeuralEncoder` (Transformer-based encoder for binned spikes), `NeuralPredictor` (MLP/RNN predictor in latent space), and `SNNEncoder` (snntorch-based spiking encoder).
+- **`jepsyn/losses`**: `lejepa_loss` (prediction + SIGReg regularization) and `DistillationLoss` (CCA-based distillation + homeostatic penalty).
+- **`jepsyn/data`**: `VBNDataHandler` for the Allen Visual Behavior Neuropixels dataset and `NeuropixelsPreprocessor` for cleaning, filtering, and binning spikes.
+- **`jepsyn/plots`**: Utilities for loss curves, latent-space metrics, spike count distributions, and prediction diagnostics.
 
-## 📁 Project Structure
+### 📁 Project structure
 
-- `src/models/`: Architecture definitions for `SNNEncoder`, `TransformerEncoder`, and `NeuralPredictor`.
-- `src/losses/`: Implementation of `lejepa_loss` and `SIGReg` regularization.
-- `src/data/`: Data loading and preprocessing pipelines for Neuropixels data.
-- `src/plots/`: Visualization tools for latent space analysis, neural activity, and training diagnostics.
-- `proof_of_concept_edit.py`: Main execution script for training and evaluating the model on a single session.
+- **`jepsyn/`**: Core library code (models, losses, data, plotting, utils).
+- **`experiments/single_session/`**: Proof-of-concept training + distillation on a single ecephys session.
+- **`experiments/multi_session/`**: Scaffold for multi-session training driven by YAML configs.
+- **`visual_behavior_neuropixels_data/`**: Local cache for the Allen Neuropixels project (created by `allensdk`).
 
----
+### Single-session proof-of-concept
 
-## 🚀 Remote GPU Setup via VS Code Tunnel
+This is the main working pipeline right now: it trains a JEPA **teacher** (Transformer encoder + predictor) and then distills it into a spiking **student**.
 
-Running this project often requires significant GPU memory (e.g., NVIDIA A100). The following setup allows you to use Google Colab's powerful hardware while maintaining a professional development environment in VS Code.
+- **Entry point**: `experiments/single_session/single_session.py`
+- **What it does**:
+  - Downloads/loads one Visual Behavior Neuropixels session.
+  - Preprocesses and bins spikes around image-change events.
+  - Trains a JEPA teacher on context → future prediction.
+  - Distills the teacher into an SNN using CCA + homeostatic regularization.
+  - Saves plots and summaries under `runs/proof_of_concept/`.
 
-### Phase 1: The "Power Switch" (Colab Notebook)
+**Example (local GPU or remote GPU with VS Code tunnel):**
 
-Run these cells in an A100-enabled Colab notebook to prepare the environment and open the tunnel.
+```bash
+export MPLBACKEND=Agg  # headless plotting
+python -m experiments.single_session.single_session <SESSION_ID> \
+  --dataset-dir /path/to/preprocessed/session_<SESSION_ID>.pkl
+```
 
-1. **Clone the Repo**:
-   ```python
-   !git clone https://github.com/jacobposchl/snn-jepa
-   %cd snn-jepa
-   ```
+If `--dataset-dir` is omitted, the script will create `preprocessed/session_<SESSION_ID>.pkl` using the Allen cache under `visual_behavior_neuropixels_data/`.
 
-2. **Mount Data**:
-   ```python
-   from google.colab import drive
-   drive.mount('/content/drive')
-   # Unzip your preprocessed data to the VM's local SSD for speed
-   !unzip /content/drive/MyDrive/path/to/your/processed.zip -d /content/preprocessed_data
-   ```
+### Multi-session experiment (WIP)
 
-3. **Launch the Tunnel**:
-   ```python
-   !curl -Lk 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' --output vscode_cli.tar.gz
-   !tar -xf vscode_cli.tar.gz
-   !./code tunnel
-   ```
-   *Follow the link provided in the output to authenticate with GitHub.*
+- **Entry point**: `experiments/multi_session/multi_session.py`
+- **Config template**: `experiments/multi_session/configs/lejepa_lif_visual_cortex.yaml`
 
-### Phase 2: The "Control Room" (VS Code)
+This script is a scaffold for training on many sessions at once. It:
 
-Once the tunnel is active, connect from your local VS Code:
+- Validates a YAML config via `jepsyn.utils.verify_config`.
+- Expects a precomputed windowed CSV dataset and splits it into train/val/test by `session_id`.
+- Defines placeholders for:
+  - `train_lejepa` (multi-session JEPA training),
+  - `distill_snn` (multi-session SNN distillation),
+  - `evaluate_model` and `save_results`.
 
-1. **Connect**: 
-   - Install the **Remote - Tunnels** extension in VS Code.
-   - Click the blue icon (bottom-left) > **Connect to Tunnel**.
-2. **Atomic Installation**: 
-   Open the VS Code terminal (`Ctrl + ` `) and run the following to ensure the exact legacy versions required for AllenSDK compatibility:
-   ```bash
-   pip install torch torchvision torchaudio snntorch tqdm lsd timg pynwb SimpleITK allensdk==2.16.2 "numpy<1.24" "pandas<2.0.0"
-   ```
-3. **Run with Backend Override**:
-   Since the tunnel is headless, you must override the Matplotlib backend to avoid errors:
-   ```bash
-   export MPLBACKEND=Agg
-   python3 proof_of_concept_edit.py <SESSION_ID> --dataset-dir "/content/preprocessed_data/processed.pkl"
-   ```
+These functions are marked TODO and intended as starting points for a full-scale experiment.
 
-## 📊 Visualization
+### Dependencies
 
-The project generates several diagnostic plots in the `runs/` directory, including:
-- **Latent Space Trajectories**: Visualizing how neural states evolve over time.
-- **Prediction Accuracy**: Comparing predicted future latents against actual encoded latents.
-- **Firing Rate Distributions**: Ensuring the SNN maintains biological firing rates via homeostatic penalties.
+Install dependencies (CPU or GPU build of PyTorch as appropriate):
+
+```bash
+pip install -r requirements.txt
+```
+
+Key libraries include:
+
+- `torch`, `torchvision`, `snntorch`
+- `allensdk` (Visual Behavior Neuropixels project cache)
+- `numpy`, `pandas`, `scikit-learn`, `matplotlib`, `pyyaml`
+
+### Outputs
+
+The single-session experiment writes to `runs/proof_of_concept/run_*`:
+
+- Training and validation loss curves for JEPA.
+- Latent prediction vs target diagnostics.
+- Spike count distributions.
+- CCA similarity and homeostatic penalty traces for SNN distillation.

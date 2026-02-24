@@ -12,6 +12,7 @@ __pycache__/
 visual_behavior_neuropixels_data/
 preprocessed/
 runs/
+datasets/
 .venv/
 .github/
 out/
