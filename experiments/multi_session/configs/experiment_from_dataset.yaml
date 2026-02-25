@@ -1,16 +1,16 @@
 # Experiment config: use a pre-built dataset (no session extraction).
 # Run the dataset pipeline first:
 #   python -m experiments.data.create_dataset path/to/dataset_config.yaml
-# Then point data_path below at the output CSV.
+# Then point data_path below at the output Parquet.
 
-# Path to the windowed CSV produced by the dataset pipeline (required).
-data_path: ./datasets/visual_cortex_windows.csv
+# Path to the windowed Parquet produced by the dataset pipeline (required).
+data_path: ./datasets/visual_cortex_windows.parquet
 
 # Output paths (optional)
 results_out_path:
 plots_out_path:
 
-# Data split (by session_id). No dataset_config needed—we only read the CSV.
+# Data split (by session_id). No dataset_config needed—we only read the Parquet.
 data:
   train_split: 0.7
   val_split: 0.15

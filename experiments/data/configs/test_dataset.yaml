@@ -1,4 +1,4 @@
-data_path: ./datasets/test_windows.csv
+data_path: ./datasets/test_windows.parquet
 
 dataset_config:
   cache_dir: ../../../visual_behavior_neuropixels_data/
