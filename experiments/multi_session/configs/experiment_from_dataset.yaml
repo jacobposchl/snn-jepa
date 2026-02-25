@@ -1,0 +1,29 @@
+# Experiment config: use a pre-built dataset (no session extraction).
+# Run the dataset pipeline first:
+#   python -m experiments.data.create_dataset path/to/dataset_config.yaml
+# Then point data_path below at the output CSV.
+
+# Path to the windowed CSV produced by the dataset pipeline (required).
+data_path: ./datasets/visual_cortex_windows.csv
+
+# Output paths (optional)
+results_out_path:
+plots_out_path:
+
+# Data split (by session_id). No dataset_config needed—we only read the CSV.
+data:
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  random_state: 42
+
+# Model (required by verify_config as model_config)
+model_config:
+  encoder_type: transformer
+  n_units: 256
+  latent_dim: 64
+
+# Training (required by verify_config as training_config)
+training_config:
+  epochs: 100
+  batch_size: 32

@@ -147,13 +147,14 @@ def train_lejepa(config: Dict[str, Any], train_data: Any, val_data: Any) -> Tupl
     """
     # TODO: Implement LeJEPA training
 
-    # - Initialize model from config
-    enc_model = config.encoder_type
-    n_units = config.n_units
-    latent_dim = config.latent_dim
+    # - Initialize model from config (support nested model_config or flat config)
+    model_cfg = config.get("model_config") or config
+    enc_model = model_cfg.get("encoder_type")
+    n_units = model_cfg.get("n_units")
+    latent_dim = model_cfg.get("latent_dim")
 
     # Inputs probably need fixing
-    encoder = NeuralEncoder(n_units = n_units, latent_dim = latent_dim, encoder_type = enc_model)
+    encoder = NeuralEncoder(n_units=n_units, latent_dim=latent_dim, encoder_type=enc_model)
     
     # - Training loop with validation
     

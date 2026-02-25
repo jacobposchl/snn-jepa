@@ -1,11 +1,11 @@
-### Data utilities
+### Dataset pipeline (step 1)
 
-This folder contains utilities for **exploring the Allen Visual Behavior Neuropixels dataset** and for **creating the flat windowed CSV** used by multi-session experiments.
+This folder is the **dataset pipeline**: extract sessions from the Allen cache and write a single windowed CSV. Run this **once** (or when you change sessions/regions/windowing); the experiment pipeline then uses the saved CSV and does not re-extract sessions.
 
 Current entry points:
 
-- **`data_analysis.py`**: interactive exploration of sessions and metadata.
-- **`create_dataset.py`**: batch creation of a preprocessed CSV dataset for `experiments/multi_session/multi_session.py`.
+- **`data_analysis.py`**: interactive exploration of sessions and metadata (to choose sessions/regions for the dataset).
+- **`create_dataset.py`**: batch creation of a preprocessed CSV dataset consumed by the **experiment pipeline** (`experiments/multi_session/multi_session.py`).
 
 ---
 
@@ -78,7 +78,7 @@ This tool is mainly for **choosing which sessions and regions to include** when 
 
 ### Using `create_dataset.py` (build flat windowed CSV)
 
-**Purpose**: Generate a single CSV with **one row per temporal window** across many sessions, to be consumed by `experiments/multi_session/multi_session.py`.
+**Purpose**: Generate a single CSV with **one row per temporal window** across many sessions. This is the **dataset pipeline** output; the **experiment pipeline** (`experiments/multi_session/multi_session.py`) reads this CSV via `data_path` and does not perform any session extraction.
 
 Each row in the CSV has:
 
@@ -96,7 +96,7 @@ This is exactly the structure expected by `load_and_prepare_data` in `experiment
 
 `create_dataset.py` reads a YAML config that specifies:
 
-- **`data_path`**: output CSV path (this will later be passed to `multi_session.py` as `config["data_path"]`).
+- **`data_path`**: output CSV path. Use this same path as `data_path` in your **experiment config** when running `multi_session.py`.
 - **`dataset_config`**:
   - **`cache_dir`**: path to `visual_behavior_neuropixels_data` (Allen cache).
   - **`session_ids`**: explicit list of ecephys session IDs to include.
@@ -143,4 +143,4 @@ The script will:
   - Build rows with `events_units`, `events_times_ms`, `stimulus`, and `behavior`.
 - Concatenate all windows into a single `pandas.DataFrame` and write it to `data_path`.
 
-You can then point your multi-session experiment config at this CSV via its `data_path` field.
+Then run the **experiment pipeline** (step 2) with a config whose `data_path` points to this CSV. See [experiments/README.md](../README.md) for the two-pipeline overview.

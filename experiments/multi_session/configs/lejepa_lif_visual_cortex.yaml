@@ -1,23 +1,22 @@
-# Paths
-data_path: 
+# Paths (data_path must point to a CSV from the dataset pipeline)
+data_path:
 results_out_path:
-plots_out_path:  
+plots_out_path:
 
-
-# Data Split Sizes
+# Data split sizes (by session_id)
 data:
   train_split:
   test_split:
   val_split:
   random_state:
 
-# Training:
-epochs:
-batch_size: 
-
-# Model
-model:
+# Model (required: model_config)
+model_config:
   encoder_type:
   n_units:
   latent_dim:
-   
+
+# Training (required: training_config)
+training_config:
+  epochs:
+  batch_size:
