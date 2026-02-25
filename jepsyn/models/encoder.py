@@ -1,245 +1,247 @@
 """
-Encoder model for creating a latent representation of binned neural data.
+Perceiver-style encoder for spike event token streams.
 
-Uses a Transformer architecture to capture temporal dependencies in neural
-population activity across time.
+Takes variable-length event sequences (unit_ids, time_ids) and compresses them
+into a fixed latent set via cross-attention, then refines via self-attention.
 
-The encoder takes binned spike counts and outputs compact latent representations
-suitable for downstream tasks like prediction (JEPA framework).
+Architecture:
+    Token embedding (unit + time) → Cross-attention → Latent self-attention → Output
 """
 
-from typing import Optional, Tuple
+from typing import Dict, Tuple
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math
 
 
-class TransformerEncoder(nn.Module):
+class _FFN(nn.Module):
+    """Two-layer feedforward network used inside the cross-attention block."""
+
+    def __init__(self, d_model: int, dim_feedforward: int, dropout: float):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_model, dim_feedforward),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim_feedforward, d_model),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class PerceiverEncoder(nn.Module):
     """
-    Transformer encoder for binned neural data.
-    
-    Processes neural population activity across time using self-attention,
-    allowing each timestep to attend to all other timesteps in the sequence.
-    
-    Architecture:
-        Input projection -> Positional encoding -> Transformer blocks -> Output projection
-        
+    Perceiver-style encoder: variable-length spike events → fixed latent set.
+
+    Pipeline per forward pass:
+        1. Embed each event: unit_embed(session-specific) + time_embed(shared) → x [B, E, D]
+        2. Cross-attend: learned latents attend over event tokens → z [B, L, D]
+        3. Self-attend: refine latents through M Transformer blocks → z [B, L, D]
+        4. Pool: h = mean(z, dim=1) → [B, D]
+
     Args:
-        n_units: Number of input units (neurons) in the population
-        latent_dim: Dimensionality of the latent representation
-        d_model: Internal dimensionality of transformer (default: 256)
-        n_heads: Number of attention heads (default: 8)
-        n_layers: Number of transformer layers (default: 4)
-        dim_feedforward: Dimension of feedforward network (default: 1024)
-        dropout: Dropout probability (default: 0.1)
-        max_seq_len: Maximum sequence length for positional encoding (default: 5000)
+        session_unit_maps : {session_id: {raw_unit_id: 1-indexed contiguous idx}}.
+                            Passed directly from load_and_prepare_data().
+        d_model           : Embedding and model dimension.
+        n_latents         : Number of learned latent slots (L).
+        max_time_ms       : Time embedding vocabulary size; must be ≥ window_size_ms.
+        n_cross_attn_heads: Attention heads for the cross-attention layer.
+        n_self_attn_layers: Number of latent self-attention Transformer blocks.
+        n_self_attn_heads : Attention heads for self-attention.
+        dim_feedforward   : FFN hidden dim in self-attention blocks.
+        dropout           : Dropout probability throughout.
     """
-    
+
     def __init__(
         self,
-        n_units: int,
-        latent_dim: int,
+        session_unit_maps: Dict[int, Dict[int, int]],
         d_model: int = 256,
-        n_heads: int = 8,
-        n_layers: int = 4,
+        n_latents: int = 64,
+        max_time_ms: int = 400,
+        n_cross_attn_heads: int = 4,
+        n_self_attn_layers: int = 4,
+        n_self_attn_heads: int = 8,
         dim_feedforward: int = 1024,
         dropout: float = 0.1,
-        max_seq_len: int = 5000,
     ):
         super().__init__()
-        
-        self.n_units = n_units
-        self.latent_dim = latent_dim
+
         self.d_model = d_model
-        
-        # Input projection: map from n_units to d_model
-        self.input_projection = nn.Linear(n_units, d_model)
-        
-        # Learnable positional encoding
-        self.pos_embedding = nn.Parameter(torch.randn(1, max_seq_len, d_model))
-        
-        # Transformer encoder layers
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
+        self.n_latents = n_latents
+
+        # Per-session unit embedding tables.
+        # Vocab size = N_s + 1; index 0 is PAD (padding_idx=0 → zero vector).
+        self.unit_embeds = nn.ModuleDict({
+            str(sid): nn.Embedding(len(unit_map) + 1, d_model, padding_idx=0)
+            for sid, unit_map in session_unit_maps.items()
+        })
+
+        # Shared time embedding: one entry per ms in the window.
+        self.time_embed = nn.Embedding(max_time_ms, d_model)
+
+        # Learned latent array [L, D].
+        self.latents = nn.Parameter(torch.randn(n_latents, d_model))
+
+        # Input norm applied to event tokens before cross-attention.
+        self.input_norm = nn.LayerNorm(d_model)
+
+        # Cross-attention (latents as queries, event tokens as keys/values).
+        self.cross_attn = nn.MultiheadAttention(
+            d_model, n_cross_attn_heads, batch_first=True, dropout=dropout
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-        
-        # Output projection: map from d_model to latent_dim
-        self.output_projection = nn.Linear(d_model, latent_dim)
-        
-        # Layer norm for output
-        self.output_norm = nn.LayerNorm(latent_dim)
-        
-        self.dropout = nn.Dropout(dropout)
-        
-        # Initialize output projection with small weights to avoid variance collapse
-        nn.init.xavier_normal_(self.output_projection.weight, gain=0.01)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.cross_norm_q = nn.LayerNorm(d_model)    # pre-norm on queries (latents)
+        self.cross_norm_kv = nn.LayerNorm(d_model)   # pre-norm on keys/values (events)
+        self.cross_ffn = _FFN(d_model, dim_feedforward, dropout)
+        self.cross_norm_ff = nn.LayerNorm(d_model)
+
+        # Latent self-attention blocks (pre-norm Transformer).
+        self.self_attn_blocks = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=n_self_attn_heads,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            ),
+            num_layers=n_self_attn_layers,
+        )
+
+        self.output_norm = nn.LayerNorm(d_model)
+
+    def forward(
+        self,
+        session_ids: torch.Tensor,  # [B] long
+        unit_ids: torch.Tensor,     # [B, E] long, 1-indexed, 0 = PAD
+        time_ids: torch.Tensor,     # [B, E] long, values in [0, max_time_ms)
+        attn_mask: torch.Tensor,    # [B, E] bool, True = real token
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass through the transformer encoder.
-        
         Args:
-            x: Input tensor of shape:
-                - (batch, n_units) for single time step -> will be unsqueezed
-                - (batch, n_time_bins, n_units) for multiple time steps
-        
+            session_ids : [B] — which session each example belongs to.
+            unit_ids    : [B, E] — 1-indexed unit token per spike (0 = PAD).
+            time_ids    : [B, E] — integer ms offset within window.
+            attn_mask   : [B, E] — True for real tokens, False for padding.
+
         Returns:
-            Latent representations of shape:
-                - (batch, latent_dim) for single time step input
-                - (batch, n_time_bins, latent_dim) for multiple time steps
+            Z : [B, L, D] — full latent set.
+            h : [B, D]    — mean-pooled latent (for probes / loss).
         """
-        squeeze_output = False
-        
-        # Handle 2D input (batch, n_units) - single time step
-        if x.dim() == 2:
-            x = x.unsqueeze(1)  # (batch, 1, n_units)
-            squeeze_output = True
-        
-        # Now x is (batch, n_time_bins, n_units)
-        batch_size, seq_len, n_units = x.shape
-        
-        # Input projection
-        x = self.input_projection(x)  # (batch, seq_len, d_model)
-        
-        # Add positional encoding
-        x = x + self.pos_embedding[:, :seq_len, :]
-        x = self.dropout(x)
-        
-        # Transformer encoding
-        x = self.transformer(x)  # (batch, seq_len, d_model)
-        
-        # Output projection
-        x = self.output_projection(x)  # (batch, seq_len, latent_dim)
-        x = self.output_norm(x)
-        
-        # Squeeze back to 2D if input was 2D
-        if squeeze_output:
-            x = x.squeeze(1)  # (batch, latent_dim)
-        
-        return x
+        B = session_ids.shape[0]
+
+        # 1. Event token embedding
+        # Unit embeddings: dispatch per session (ModuleDict requires str keys).
+        x_unit = torch.zeros(
+            B, unit_ids.shape[1], self.d_model,
+            device=unit_ids.device, dtype=torch.float32
+        )
+        for sid_val in session_ids.unique():
+            sid_str = str(sid_val.item())
+            mask = (session_ids == sid_val)                # [B] bool
+            x_unit[mask] = self.unit_embeds[sid_str](unit_ids[mask])
+
+        # Time embeddings: shared across sessions.
+        x = x_unit + self.time_embed(time_ids)             # [B, E, D]
+        x = self.input_norm(x)
+
+        # 2. Cross-attention: latents attend over event tokens.
+        z0 = self.latents[None].expand(B, -1, -1)          # [B, L, D]
+        q = self.cross_norm_q(z0)
+        kv = self.cross_norm_kv(x)
+        # PyTorch MHA key_padding_mask: True = IGNORE (inverse of our attn_mask).
+        attn_out, _ = self.cross_attn(
+            q, kv, kv, key_padding_mask=~attn_mask
+        )
+        z = z0 + attn_out                                  # residual
+
+        # Post-cross-attention FFN with residual.
+        z = z + self.cross_ffn(self.cross_norm_ff(z))
+
+        # 3. Latent self-attention.
+        z = self.self_attn_blocks(z)                       # [B, L, D]
+
+        # 4. Output norm and mean pool.
+        z = self.output_norm(z)
+        h = z.mean(dim=1)                                  # [B, D]
+
+        return z, h
 
 
 class NeuralEncoder(nn.Module):
     """
-    High-level encoder wrapper for neural data.
-    
-    This is the main interface for encoding binned neural data. Wraps
-    TransformerEncoder for capturing temporal dependencies.
-    
+    High-level encoder wrapper.
+
+    Wraps PerceiverEncoder and provides the stable public interface consumed
+    by multi_session.py.
+
     Args:
-        n_units: Number of input units (neurons)
-        latent_dim: Dimensionality of latent representation
-        encoder_type: Type of encoder ('transformer')
-        **kwargs: Additional arguments passed to the underlying encoder
+        session_unit_maps : {session_id: {raw_unit_id: 1-indexed idx}}.
+                            Passed from load_and_prepare_data().
+        d_model           : Model/embedding dimension (also the latent dimension).
+        n_latents         : Number of learned latent slots.
+        max_time_ms       : Time embedding vocabulary size.
+        encoder_type      : Currently only 'perceiver' is supported.
+        **kwargs          : Forwarded to PerceiverEncoder.
     """
-    
+
     def __init__(
         self,
-        n_units: int,
-        latent_dim: int,
-        encoder_type: str = "transformer",
+        session_unit_maps: Dict[int, Dict[int, int]],
+        d_model: int = 256,
+        n_latents: int = 64,
+        max_time_ms: int = 400,
+        encoder_type: str = "perceiver",
         **kwargs,
     ):
         super().__init__()
-        
-        self.n_units = n_units
-        self.latent_dim = latent_dim
+
+        self.d_model = d_model
+        self.n_latents = n_latents
         self.encoder_type = encoder_type
-        
-        if encoder_type.lower() == "transformer":
-            self.encoder = TransformerEncoder(n_units, latent_dim, **kwargs)
+
+        if encoder_type.lower() == "perceiver":
+            self.encoder = PerceiverEncoder(
+                session_unit_maps=session_unit_maps,
+                d_model=d_model,
+                n_latents=n_latents,
+                max_time_ms=max_time_ms,
+                **kwargs,
+            )
         else:
             raise ValueError(
-                f"Unknown encoder_type: {encoder_type}. "
-                "Currently only 'transformer' is supported."
+                f"Unknown encoder_type: '{encoder_type}'. "
+                "Currently only 'perceiver' is supported."
             )
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Encode binned neural data.
-        
-        Args:
-            x: Binned spike counts, shape:
-                - (batch, n_units) for single time step
-                - (batch, n_time_bins, n_units) for multiple time steps
-        
-        Returns:
-            Latent representations, shape:
-                - (batch, latent_dim) for single time step
-                - (batch, n_time_bins, latent_dim) for multiple time steps
-        """
-        return self.encoder(x)
-    
-    def encode_window(
+
+    def forward(
         self,
-        x: torch.Tensor,
-        window_size: int = 1,
-        stride: int = 1,
+        session_ids: torch.Tensor,
+        unit_ids: torch.Tensor,
+        time_ids: torch.Tensor,
+        attn_mask: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Encode using sliding windows over time.
-        
-        Useful for creating overlapping context windows for prediction tasks.
-        
+        Encode a batch of spike event windows.
+
         Args:
-            x: Input of shape (batch, n_time_bins, n_units)
-            window_size: Number of time bins per window
-            stride: Step size between windows
-        
+            session_ids : [B] long
+            unit_ids    : [B, E] long, 1-indexed (0 = PAD)
+            time_ids    : [B, E] long, ms offset in [0, max_time_ms)
+            attn_mask   : [B, E] bool, True = real token
+
         Returns:
-            Tuple of:
-                - encoded_windows: (batch, n_windows, latent_dim)
-                - window_indices: (n_windows,) array of window start indices
+            Z : [B, L, D] — full latent set (use for JEPA prediction target/context)
+            h : [B, D]    — mean-pooled latent (use for probes)
         """
-        if x.dim() != 3:
-            raise ValueError(
-                f"Expected 3D input (batch, n_time_bins, n_units), got {x.shape}"
-            )
-        
-        batch_size, n_time_bins, n_units = x.shape
-        
-        # Create sliding windows
-        windows = []
-        indices = []
-        
-        for i in range(0, n_time_bins - window_size + 1, stride):
-            window = x[:, i : i + window_size, :]  # (batch, window_size, n_units)
-            windows.append(window)
-            indices.append(i)
-        
-        if len(windows) == 0:
-            raise ValueError(
-                "No valid windows created. Try smaller window_size or larger input."
-            )
-        
-        # Stack windows: (n_windows, batch, window_size, n_units)
-        windows_tensor = torch.stack(windows, dim=0)
-        n_windows = windows_tensor.shape[0]
-        
-        # Reshape to process all windows: (n_windows * batch, window_size, n_units)
-        windows_flat = windows_tensor.view(-1, window_size, n_units)
-        
-        # Encode each window (output: n_windows * batch, latent_dim)
-        # Output shape: (n_windows * batch, window_size, latent_dim)
-        encoded_flat = self.encoder(windows_flat)
-        
-        # Take last timestep from each window: (n_windows * batch, latent_dim)
-        encoded_flat = encoded_flat[:, -1, :]
-        # Reshape back: (n_windows, batch, latent_dim)
-        encoded_windows = encoded_flat.view(n_windows, batch_size, self.latent_dim)
-        
-        # Transpose to (batch, n_windows, latent_dim)
-        encoded_windows = encoded_windows.transpose(0, 1)
-        
-        return encoded_windows, torch.tensor(indices, device=x.device)
-    
+        return self.encoder(session_ids, unit_ids, time_ids, attn_mask)
+
     def get_latent_dim(self) -> int:
-        """Return the dimensionality of the latent representation."""
-        return self.latent_dim
+        """Return the model dimension D."""
+        return self.d_model
+
+    def get_n_latents(self) -> int:
+        """Return the number of latent slots L."""
+        return self.n_latents

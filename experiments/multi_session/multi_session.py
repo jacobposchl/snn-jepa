@@ -4,154 +4,365 @@ With Training of LeJEPA Model and Distillation into
 a Spiking Neural Network Model
 """
 
-# Imports
 import argparse
+import copy
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import pandas as pd
-import yaml
+import torch
+import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader
 
-from jepsyn.models import NeuralEncoder
-from jepsyn.utils import verify_config
+from jepsyn.data import REQUIRED_COLUMNS, SpikeWindowDataset, spike_collate_fn
+from jepsyn.losses import lejepa_loss, sigreg
+from jepsyn.models import NeuralEncoder, NeuralPredictor
+from jepsyn.utils import create_context_mask, update_ema, verify_config
 
 
-def load_and_prepare_data(config: Dict[str, Any]) -> Tuple[Any, Any, Any]:
+def load_and_prepare_data(
+    config: Dict[str, Any],
+) -> Tuple[DataLoader, DataLoader, DataLoader, Dict[int, Dict[int, int]]]:
     """
-    Load and prepare multi-session neural data for training and testing.
+    Load the spike-window parquet, validate it, split by session, and return DataLoaders.
+
+    Each DataLoader yields batches from spike_collate_fn:
+        session_ids    LongTensor [B]
+        unit_ids       LongTensor [B, max_E]  — 1-indexed contiguous unit idx (0 = PAD)
+        time_ids       LongTensor [B, max_E]  — floor(ms offset), clipped to window
+        attention_mask BoolTensor [B, max_E]  — True = real token, False = padding
+        labels         list[dict]             — test loader only, flattened stimulus fields
 
     Args:
-        config: Configuration dictionary containing data_path and split parameters
+        config: Validated configuration dict (from verify_config).
 
     Returns:
-        Tuple of (train_data, val_data, test_data)
-
-    Expected Dataset Format:
-        Columns:
-            - session_id (int): Unique identifier for each recording session
-            - window_id (int): Unique identifier for each temporal window
-            - window_start_ms (int): Window start time in milliseconds
-            - window_end_ms (int): Window end time in milliseconds
-            - events_units (np.array): Array of unit indices for each spike event
-            - events_times_ms (np.array): Spike times relative to window start (ms)
-            - stimulus: Lists of dictionaries (stimulus events with timestamps relative to window start)
-            - behavior: Lists of dictionaries (behavioral events with timestamps relative to window start)
-
-        Each row corresponds to a single temporal window of neural activity.
-
-    Validation Checks:
-        - No duplicate window_ids with conflicting window times
-        - Equal length arrays for events_units and events_times_ms
+        (train_loader, val_loader, test_loader, session_unit_maps)
+        session_unit_maps: {session_id: {raw_unit_id: 1-indexed contiguous idx}}
+            Needed by the training function to size per-session embedding tables.
     """
-    # Load dataset from Parquet instead of CSV for better performance
     data_path = config.get("data_path")
     if not data_path:
         raise ValueError("data_path not found in configuration")
 
     dataset = pd.read_parquet(data_path, engine="pyarrow")
 
-    # Validate data integrity
+    # Column validation
+    missing = [c for c in REQUIRED_COLUMNS if c not in dataset.columns]
+    if missing:
+        raise ValueError(f"Parquet is missing required columns: {missing}")
+
     print("Validating dataset integrity...")
 
-    # Check for duplicate window_ids with conflicting timestamps
-    duplicate_check = dataset.groupby("window_id").agg(
+    # No duplicate window_ids with conflicting timestamps
+    dup = dataset.groupby("window_id").agg(
         {"window_start_ms": "nunique", "window_end_ms": "nunique"}
     )
-    conflicts = duplicate_check[
-        (duplicate_check["window_start_ms"] > 1)
-        | (duplicate_check["window_end_ms"] > 1)
-    ]
+    conflicts = dup[(dup["window_start_ms"] > 1) | (dup["window_end_ms"] > 1)]
     if not conflicts.empty:
         raise ValueError(
             f"Found {len(conflicts)} window_ids with conflicting timestamps: "
-            f"{conflicts.index.tolist()[:5]}..."
+            f"{conflicts.index.tolist()[:5]}"
         )
 
-    # Verify events_units and events_times_ms have matching lengths
-    length_mismatches = dataset[
+    # events_units and events_times_ms must have equal length per row
+    mismatches = dataset[
         dataset["events_units"].apply(len) != dataset["events_times_ms"].apply(len)
     ]
-    if not length_mismatches.empty:
+    if not mismatches.empty:
         raise ValueError(
-            f"Found {len(length_mismatches)} rows where events_units and events_times_ms "
-            f"have different lengths (window_ids: {length_mismatches['window_id'].tolist()[:5]})"
+            f"Found {len(mismatches)} rows where events_units and events_times_ms "
+            f"have different lengths (window_ids: {mismatches['window_id'].tolist()[:5]})"
         )
 
-    print("Passed Basic Validation Checks, no duplicates or length mismatches found.")
+    print("Passed basic validation checks.")
 
-    # Extract split configuration
-    train_size = config.get("data", {}).get("train_split")
-    val_size = config.get("data", {}).get("val_split")
-    test_size = config.get("data", {}).get("test_split")
-    random_state = config.get("data", {}).get("random_state")
+    # Build per-session unit maps from the full dataset before splitting.
+    # Maps raw AllenSDK unit IDs → 1-indexed contiguous indices; 0 is reserved for PAD.
+    session_unit_maps: Dict[int, Dict[int, int]] = {}
+    for sid, grp in dataset.groupby("session_id"):
+        all_units = sorted({int(u) for arr in grp["events_units"] for u in arr})
+        session_unit_maps[int(sid)] = {raw: idx + 1 for idx, raw in enumerate(all_units)}
+    print(
+        f"Built unit maps for {len(session_unit_maps)} sessions "
+        f"(sizes: {[len(m) for m in session_unit_maps.values()]})"
+    )
 
-    # Split data by session_id to prevent data leakage across sessions
+    # Session-level train / val / test split
+    data_cfg = config.get("data", {})
+    train_size = data_cfg.get("train_split", 0.7)
+    val_size = data_cfg.get("val_split", 0.15)
+    test_size = data_cfg.get("test_split", 0.15)
+    random_state = data_cfg.get("random_state", 42)
+
     unique_sessions = dataset["session_id"].unique()
-
-    # First split: separate test set
     train_val_sessions, test_sessions = train_test_split(
         unique_sessions, test_size=test_size, random_state=random_state
     )
-
-    # Second split: separate train and validation sets
     train_sessions, val_sessions = train_test_split(
         train_val_sessions,
         test_size=val_size / (train_size + val_size),
         random_state=random_state,
     )
 
-    # Create dataset splits
-    train_data = dataset[dataset["session_id"].isin(train_sessions)]
-    val_data = dataset[dataset["session_id"].isin(val_sessions)]
-    test_data = dataset[dataset["session_id"].isin(test_sessions)]
+    train_df = dataset[dataset["session_id"].isin(train_sessions)]
+    val_df = dataset[dataset["session_id"].isin(val_sessions)]
+    test_df = dataset[dataset["session_id"].isin(test_sessions)]
 
-    print(f"Train: {len(train_data)} windows ({len(train_sessions)} sessions)")
-    print(f"Val:   {len(val_data)} windows ({len(val_sessions)} sessions)")
-    print(f"Test:  {len(test_data)} windows ({len(test_sessions)} sessions)")
+    print(f"Train: {len(train_df)} windows ({len(train_sessions)} sessions)")
+    print(f"Val:   {len(val_df)} windows ({len(val_sessions)} sessions)")
+    print(f"Test:  {len(test_df)} windows ({len(test_sessions)} sessions)")
 
-    return train_data, val_data, test_data
+    batch_size = config.get("training_config", {}).get("batch_size", 32)
+    has_stimulus = "stimulus" in dataset.columns
+
+    train_loader = DataLoader(
+        SpikeWindowDataset(train_df, session_unit_maps),
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=spike_collate_fn,
+    )
+    val_loader = DataLoader(
+        SpikeWindowDataset(val_df, session_unit_maps),
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=spike_collate_fn,
+    )
+    test_loader = DataLoader(
+        SpikeWindowDataset(test_df, session_unit_maps, include_labels=has_stimulus),
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=spike_collate_fn,
+    )
+
+    return train_loader, val_loader, test_loader, session_unit_maps
+
 
 
 def train_lejepa(
-    config: Dict[str, Any], train_data: Any, val_data: Any
-) -> Tuple[Any, pd.DataFrame]:
+    config: Dict[str, Any],
+    train_data: DataLoader,
+    val_data: DataLoader,
+    unit_maps: Dict[int, Dict[int, int]],
+) -> Tuple[Dict[str, Any], pd.DataFrame]:
     """
-    Train LeJEPA teacher model on multi-session neural data.
-    Includes validation during training.
+    Train the LeJEPA teacher model on multi-session neural data.
+
+    Architecture:
+        context_encoder  (online, gradients flow) — sees masked spike events
+        target_encoder   (EMA copy, no gradients) — sees all spike events
+        predictor        (narrow Transformer)     — maps Z_ctx → Z_pred ≈ Z_tgt
+
+    Loss per batch:
+        pred_loss = MSE(Z_pred, Z_tgt)             over all [B, L, D] latent slots
+        reg_loss  = SIGReg(h_ctx) + SIGReg(h_tgt) on pooled [B, D] representations
+        total     = (1 - lambd) * pred_loss + lambd * reg_loss
+
+    The optimizer updates only context_encoder + predictor.
+    The target encoder is updated via EMA after every step.
 
     Args:
-        config: Configuration dictionary
-        train_data: Training dataset
-        val_data: Validation dataset
+        config     : Validated config dict (from verify_config).
+        train_data : Training DataLoader.
+        val_data   : Validation DataLoader.
+        unit_maps  : {session_id: {raw_unit_id: 1-indexed idx}} from load_and_prepare_data.
 
     Returns:
-        Tuple of (trained_model, training_metrics_df)
+        (model_bundle, metrics_df)
+        model_bundle: {"context_encoder", "target_encoder", "predictor"}
+        metrics_df columns: epoch, train_loss, train_pred_loss, train_reg_loss, val_loss
     """
-    # TODO: Implement LeJEPA training
+    model_cfg = config.get("model_config", {})
+    train_cfg = config.get("training_config", {})
 
-    # - Initialize model from config (support nested model_config or flat config)
-    model_cfg = config.get("model_config") or config
-    enc_model = model_cfg.get("encoder_type")
-    n_units = model_cfg.get("n_units")
-    latent_dim = model_cfg.get("latent_dim")
+    # Encoder hyperparameters
+    d_model      = model_cfg.get("d_model", 256)
+    n_latents    = model_cfg.get("n_latents", 64)
+    max_time_ms  = model_cfg.get("max_time_ms", 400)
+    encoder_type = model_cfg.get("encoder_type", "perceiver")
+    encoder_kwargs = {
+        k: model_cfg[k]
+        for k in (
+            "n_cross_attn_heads", "n_self_attn_layers", "n_self_attn_heads",
+            "dim_feedforward", "dropout",
+        )
+        if k in model_cfg
+    }
 
-    # Inputs probably need fixing
-    encoder = NeuralEncoder(
-        n_units=n_units, latent_dim=latent_dim, encoder_type=enc_model
+    # Predictor hyperparameters
+    predictor_type = model_cfg.get("predictor_type", "transformer")
+    predictor_kwargs: Dict[str, Any] = {}
+    if "predictor_n_layers" in model_cfg:
+        predictor_kwargs["n_layers"] = model_cfg["predictor_n_layers"]
+    if "predictor_n_heads" in model_cfg:
+        predictor_kwargs["n_heads"] = model_cfg["predictor_n_heads"]
+    if "predictor_dim_feedforward" in model_cfg:
+        predictor_kwargs["dim_feedforward"] = model_cfg["predictor_dim_feedforward"]
+
+    # Training hyperparameters
+    n_epochs     = train_cfg.get("epochs", 100)
+    lr           = train_cfg.get("lr", 1e-4)
+    weight_decay = train_cfg.get("weight_decay", 0.05)
+    ema_momentum = train_cfg.get("ema_momentum", 0.996)
+    mask_ratio   = train_cfg.get("mask_ratio", 0.5)
+    lambd        = train_cfg.get("lambd", 0.05)
+    num_slices   = train_cfg.get("num_slices", 256)
+    results_path = config.get("results_out_path")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Training on {device}")
+
+    # Context encoder: online network, gradients flow through this.
+    context_encoder = NeuralEncoder(
+        session_unit_maps=unit_maps,
+        d_model=d_model,
+        n_latents=n_latents,
+        max_time_ms=max_time_ms,
+        encoder_type=encoder_type,
+        **encoder_kwargs,
+    ).to(device)
+
+    # Target encoder: EMA copy, never updated by the optimizer.
+    target_encoder = copy.deepcopy(context_encoder)
+    for p in target_encoder.parameters():
+        p.requires_grad_(False)
+
+    # Predictor: narrow Transformer mapping context latents → predicted target latents.
+    predictor = NeuralPredictor(
+        d_model=d_model,
+        predictor_type=predictor_type,
+        **predictor_kwargs,
+    ).to(device)
+
+    # Optimizer: context encoder + predictor only.
+    optimizer = torch.optim.AdamW(
+        list(context_encoder.parameters()) + list(predictor.parameters()),
+        lr=lr,
+        weight_decay=weight_decay,
     )
 
-    # - Training loop with validation
+    all_metrics = []
+    global_step = 0
 
-    # Might need adjusting
-    # 1. Tokenize data (unit_id, time)
-    # 2. Encode tokenized data
-    # 3. Evaluate model
-    # val_results = evaluate_model(model = , test_data = val_data, stage = "LeJEPA")
+    for epoch in range(n_epochs):
+        # ---- Training ----
+        context_encoder.train()
+        predictor.train()
 
-    # - Save checkpoints
-    # - Return trained model and metrics
-    pass
+        train_loss_sum = train_pred_sum = train_reg_sum = 0.0
+        n_train = 0
+
+        for batch in train_data:
+            session_ids = batch["session_ids"].to(device)
+            unit_ids    = batch["unit_ids"].to(device)
+            time_ids    = batch["time_ids"].to(device)
+            attn_mask   = batch["attention_mask"].to(device)
+
+            # Hide mask_ratio of real tokens from the context encoder.
+            ctx_mask = create_context_mask(attn_mask, mask_ratio)
+
+            # Context encoder: sees only unmasked events, gradients flow.
+            Z_ctx, h_ctx = context_encoder(session_ids, unit_ids, time_ids, ctx_mask)
+
+            # Target encoder: sees all events, EMA weights, no gradients.
+            with torch.no_grad():
+                Z_tgt, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
+
+            # Predictor: Z_ctx [B, L, D] → Z_pred [B, L, D].
+            Z_pred = predictor(Z_ctx)
+            h_pred = Z_pred.mean(dim=1)   # [B, D], for SIGReg
+
+            # Prediction loss over the full latent set.
+            pred_loss = F.mse_loss(Z_pred, Z_tgt)
+
+            # SIGReg regularizes pooled representations toward isotropic Gaussian.
+            reg_loss = (
+                sigreg(h_ctx, global_step, num_slices)
+                + sigreg(h_tgt, global_step, num_slices)
+            ) / 2
+
+            loss = (1 - lambd) * pred_loss + lambd * reg_loss
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            # EMA: momentum-weighted update of target encoder from context encoder.
+            update_ema(context_encoder, target_encoder, ema_momentum)
+
+            train_loss_sum += loss.item()
+            train_pred_sum += pred_loss.item()
+            train_reg_sum  += reg_loss.item()
+            n_train += 1
+            global_step += 1
+
+        # ---- Validation ----
+        context_encoder.eval()
+        predictor.eval()
+
+        val_loss_sum = 0.0
+        n_val = 0
+
+        with torch.no_grad():
+            for batch in val_data:
+                session_ids = batch["session_ids"].to(device)
+                unit_ids    = batch["unit_ids"].to(device)
+                time_ids    = batch["time_ids"].to(device)
+                attn_mask   = batch["attention_mask"].to(device)
+
+                ctx_mask = create_context_mask(attn_mask, mask_ratio)
+                Z_ctx, h_ctx = context_encoder(session_ids, unit_ids, time_ids, ctx_mask)
+                Z_tgt, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
+                Z_pred = predictor(Z_ctx)
+
+                pred_loss = F.mse_loss(Z_pred, Z_tgt)
+                reg_loss = (
+                    sigreg(h_ctx, global_step, num_slices)
+                    + sigreg(h_tgt, global_step, num_slices)
+                ) / 2
+                loss = (1 - lambd) * pred_loss + lambd * reg_loss
+
+                val_loss_sum += loss.item()
+                n_val += 1
+
+        train_loss_avg = train_loss_sum / max(n_train, 1)
+        val_loss_avg   = val_loss_sum   / max(n_val,   1)
+
+        all_metrics.append({
+            "epoch":           epoch,
+            "train_loss":      train_loss_avg,
+            "train_pred_loss": train_pred_sum / max(n_train, 1),
+            "train_reg_loss":  train_reg_sum  / max(n_train, 1),
+            "val_loss":        val_loss_avg,
+        })
+
+        print(f"Epoch {epoch:3d} | train={train_loss_avg:.4f} | val={val_loss_avg:.4f}")
+
+    # ---- Checkpoint ----
+    if results_path:
+        ckpt_dir = Path(results_path)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_path = ckpt_dir / "lejepa_checkpoint.pt"
+        torch.save(
+            {
+                "context_encoder": context_encoder.state_dict(),
+                "target_encoder":  target_encoder.state_dict(),
+                "predictor":       predictor.state_dict(),
+                "config":          config,
+            },
+            ckpt_path,
+        )
+        print(f"Checkpoint saved to {ckpt_path}")
+
+    return (
+        {
+            "context_encoder": context_encoder,
+            "target_encoder":  target_encoder,
+            "predictor":       predictor,
+        },
+        pd.DataFrame(all_metrics),
+    )
 
 
 def distill_snn(
@@ -163,9 +374,9 @@ def distill_snn(
 
     Args:
         config: Configuration dictionary
-        teacher_model: Trained LeJEPA model
-        train_data: Training dataset
-        val_data: Validation dataset
+        teacher_model: Trained LeJEPA model bundle
+        train_data: Training DataLoader
+        val_data: Validation DataLoader
 
     Returns:
         Tuple of (trained_snn, distillation_metrics_df)
@@ -183,8 +394,8 @@ def evaluate_model(model: Any, test_data: Any, stage: str) -> pd.DataFrame:
     Evaluate a trained model on test data.
 
     Args:
-        model: Trained model (LeJEPA or SNN)
-        test_data: Test dataset
+        model: Trained model bundle
+        test_data: Test DataLoader
         stage: Model stage name ("LeJEPA" or "SNN")
 
     Returns:
@@ -216,7 +427,6 @@ def save_results(
     pass
 
 
-# Run Experiment
 def main(config_path: Path) -> None:
     """
     Main experiment runner that orchestrates the full pipeline.
@@ -224,44 +434,34 @@ def main(config_path: Path) -> None:
     Args:
         config_path: Path to the configuration YAML file
     """
-    # Verify configuration
     print("=" * 60)
     print("Verifying Configuration")
     config = verify_config(config_path)
     print(f"Configuration Verified. Using: {config_path}")
 
-    # Load and prepare data
     print("\n" + "=" * 60)
     print("Loading and Preparing Data")
-    train_data, val_data, test_data = load_and_prepare_data(config)
+    train_data, val_data, test_data, unit_maps = load_and_prepare_data(config)
     print("Data loaded successfully")
 
-    # Train LeJEPA teacher model
     print("\n" + "=" * 60)
     print("Training LeJEPA Teacher Model")
-    jepa_model, jepa_train_metrics = train_lejepa(config, train_data, val_data)
-    save_results(
-        stage="LeJEPA", phase="training", metrics=jepa_train_metrics, config=config
-    )
+    jepa_model, jepa_train_metrics = train_lejepa(config, train_data, val_data, unit_maps)
+    save_results(stage="LeJEPA", phase="training", metrics=jepa_train_metrics, config=config)
     print("LeJEPA training complete")
 
-    # Evaluate LeJEPA on test set
     print("\n" + "=" * 60)
     print("Evaluating LeJEPA on Test Set")
     jepa_test_metrics = evaluate_model(jepa_model, test_data, stage="LeJEPA")
     save_results(stage="LeJEPA", phase="test", metrics=jepa_test_metrics, config=config)
     print("LeJEPA evaluation complete")
 
-    # Distill into SNN student model
     print("\n" + "=" * 60)
     print("Distilling into Spiking Neural Network")
     snn_model, snn_train_metrics = distill_snn(config, jepa_model, train_data, val_data)
-    save_results(
-        stage="SNN", phase="distillation", metrics=snn_train_metrics, config=config
-    )
+    save_results(stage="SNN", phase="distillation", metrics=snn_train_metrics, config=config)
     print("SNN distillation complete")
 
-    # Evaluate SNN on test set
     print("\n" + "=" * 60)
     print("Evaluating Distilled SNN on Test Set")
     snn_test_metrics = evaluate_model(snn_model, test_data, stage="SNN")
