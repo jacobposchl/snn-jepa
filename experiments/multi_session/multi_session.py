@@ -11,12 +11,11 @@ from typing import Any, Dict, Tuple
 
 import pandas as pd
 import torch
-import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 
 from jepsyn.data import REQUIRED_COLUMNS, SpikeWindowDataset, spike_collate_fn
-from jepsyn.losses import lejepa_loss, sigreg
+from jepsyn.losses import lejepa_loss
 from jepsyn.models import NeuralEncoder, NeuralPredictor
 from jepsyn.utils import create_context_mask, update_ema, verify_config
 
@@ -267,22 +266,15 @@ def train_lejepa(
 
             # Target encoder: sees all events, EMA weights, no gradients.
             with torch.no_grad():
-                Z_tgt, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
+                _, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
 
             # Predictor: Z_ctx [B, L, D] → Z_pred [B, L, D].
             Z_pred = predictor(Z_ctx)
-            h_pred = Z_pred.mean(dim=1)   # [B, D], for SIGReg
+            h_pred = Z_pred.mean(dim=1)   # [B, D]
 
-            # Prediction loss over the full latent set.
-            pred_loss = F.mse_loss(Z_pred, Z_tgt)
-
-            # SIGReg regularizes pooled representations toward isotropic Gaussian.
-            reg_loss = (
-                sigreg(h_ctx, global_step, num_slices)
-                + sigreg(h_tgt, global_step, num_slices)
-            ) / 2
-
-            loss = (1 - lambd) * pred_loss + lambd * reg_loss
+            loss, pred_loss, reg_loss = lejepa_loss(
+                h_ctx, h_tgt, h_pred, global_step, lambd, num_slices
+            )
 
             optimizer.zero_grad()
             loss.backward()
@@ -313,15 +305,13 @@ def train_lejepa(
 
                 ctx_mask = create_context_mask(attn_mask, mask_ratio)
                 Z_ctx, h_ctx = context_encoder(session_ids, unit_ids, time_ids, ctx_mask)
-                Z_tgt, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
+                _, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
                 Z_pred = predictor(Z_ctx)
+                h_pred = Z_pred.mean(dim=1)   # [B, D]
 
-                pred_loss = F.mse_loss(Z_pred, Z_tgt)
-                reg_loss = (
-                    sigreg(h_ctx, global_step, num_slices)
-                    + sigreg(h_tgt, global_step, num_slices)
-                ) / 2
-                loss = (1 - lambd) * pred_loss + lambd * reg_loss
+                loss, _, _ = lejepa_loss(
+                    h_ctx, h_tgt, h_pred, global_step, lambd, num_slices
+                )
 
                 val_loss_sum += loss.item()
                 n_val += 1
