@@ -34,22 +34,21 @@ def load_and_prepare_data(config: Dict[str, Any]) -> Tuple[Any, Any, Any]:
             - window_end_ms (int): Window end time in milliseconds
             - events_units (np.array): Array of unit indices for each spike event
             - events_times_ms (np.array): Spike times relative to window start (ms)
-            - stimulus (str): JSON-encoded stimulus events with timestamps relative to window start
-            - behavior (str): JSON-encoded behavioral events with timestamps relative to window start
+            - stimulus: Lists of dictionaries (stimulus events with timestamps relative to window start)
+            - behavior: Lists of dictionaries (behavioral events with timestamps relative to window start)
         
         Each row corresponds to a single temporal window of neural activity.
     
     Validation Checks:
         - No duplicate window_ids with conflicting window times
         - Equal length arrays for events_units and events_times_ms
-        - Valid JSON format for stimulus and behavior columns
     """
-    # Load dataset from CSV
+    # Load dataset from Parquet
     data_path = config.get("data_path")
     if not data_path:
         raise ValueError("data_path not found in configuration")
     
-    dataset = pd.read_csv(data_path)
+    dataset = pd.read_parquet(data_path, engine="pyarrow")
     
     # Validate data integrity
     print("Validating dataset integrity...")
@@ -75,24 +74,6 @@ def load_and_prepare_data(config: Dict[str, Any]) -> Tuple[Any, Any, Any]:
         raise ValueError(
             f"Found {len(length_mismatches)} rows where events_units and events_times_ms "
             f"have different lengths (window_ids: {length_mismatches['window_id'].tolist()[:5]})"
-        )
-
-    # Validate JSON format for stimulus and behavior columns
-    import json
-    invalid_json = []
-    for idx, row in dataset.iterrows():
-        try:
-            json.loads(row['stimulus'])
-            json.loads(row['behavior'])
-        except (json.JSONDecodeError, TypeError) as e:
-            invalid_json.append((idx, row['window_id']))
-            if len(invalid_json) >= 5:  # Only collect first 5 examples
-                break
-
-    if invalid_json:
-        raise ValueError(
-            f"Found invalid JSON in {len(invalid_json)} rows: "
-            f"window_ids {[w for _, w in invalid_json]}"
         )
 
     print("Passed Basic Validation Checks")

@@ -1,4 +1,4 @@
-# Paths (data_path must point to a CSV from the dataset pipeline)
+# Paths (data_path must point to a Parquet from the dataset pipeline)
 data_path:
 results_out_path:
 plots_out_path:
