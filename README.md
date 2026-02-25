@@ -42,13 +42,13 @@ If `--dataset-dir` is omitted, the script will create `preprocessed/session_<SES
 
 The multi-session workflow is split into **two pipelines** so you don’t re-extract sessions on every run:
 
-1. **Dataset pipeline** (run once): `experiments/data/create_dataset.py` — extracts sessions from the Allen cache and writes a single windowed CSV. Config: `data_path` + `dataset_config` (cache_dir, session_ids, brain_areas, quality, windowing).
-2. **Experiment pipeline** (run many times): `experiments/multi_session/multi_session.py` — loads that CSV via `data_path`, splits by session into train/val/test, then trains LeJEPA and distills into an SNN. No session extraction; only the pre-built CSV is used.
+1. **Dataset pipeline** (run once): `experiments/data/create_dataset.py` — extracts sessions from the Allen cache and writes a single windowed Parquet file. Config: `data_path` + `dataset_config` (cache_dir, session_ids, brain_areas, quality, windowing).
+2. **Experiment pipeline** (run many times): `experiments/multi_session/multi_session.py` — loads that Parquet via `data_path`, splits by session into train/val/test, then trains LeJEPA and distills into an SNN. No session extraction; only the pre-built Parquet is used.
 
 See **[experiments/README.md](experiments/README.md)** for the full two-pipeline overview and config reference.
 
 - **Entry point (experiment)**: `experiments/multi_session/multi_session.py`
-- **Configs**: `experiments/multi_session/configs/lejepa_lif_visual_cortex.yaml` (template), `experiments/multi_session/configs/experiment_from_dataset.yaml` (experiment-only, points at existing CSV).
+- **Configs**: `experiments/multi_session/configs/lejepa_lif_visual_cortex.yaml` (template), `experiments/multi_session/configs/experiment_from_dataset.yaml` (experiment-only, points at existing Parquet).
 
 The experiment script validates the config, loads the dataset from `data_path`, and defines placeholders for `train_lejepa`, `distill_snn`, `evaluate_model`, and `save_results` (TODO for full implementation). **torch_brain** will be integrated for multi-recording training and data loaders.
 
@@ -65,6 +65,7 @@ Key libraries include:
 - `torch`, `torchvision`, `snntorch`
 - `allensdk` (Visual Behavior Neuropixels project cache)
 - `numpy`, `pandas`, `scikit-learn`, `matplotlib`, `pyyaml`
+- `pyarrow`, `temporaldata`
 
 ### Outputs
 

@@ -1,11 +1,11 @@
 ### Dataset pipeline (step 1)
 
-This folder is the **dataset pipeline**: extract sessions from the Allen cache and write a single windowed CSV. Run this **once** (or when you change sessions/regions/windowing); the experiment pipeline then uses the saved CSV and does not re-extract sessions.
+This folder is the **dataset pipeline**: extract sessions from the Allen cache and write a single windowed Parquet. Run this **once** (or when you change sessions/regions/windowing); the experiment pipeline then uses the saved Parquet and does not re-extract sessions.
 
 Current entry points:
 
 - **`data_analysis.py`**: interactive exploration of sessions and metadata (to choose sessions/regions for the dataset).
-- **`create_dataset.py`**: batch creation of a preprocessed CSV dataset consumed by the **experiment pipeline** (`experiments/multi_session/multi_session.py`).
+- **`create_dataset.py`**: batch creation of a preprocessed Parquet dataset consumed by the **experiment pipeline** (`experiments/multi_session/multi_session.py`).
 
 ---
 
@@ -76,19 +76,19 @@ This tool is mainly for **choosing which sessions and regions to include** when 
 
 ---
 
-### Using `create_dataset.py` (build flat windowed CSV)
+### Using `create_dataset.py` (build flat windowed Parquet)
 
-**Purpose**: Generate a single CSV with **one row per temporal window** across many sessions. This is the **dataset pipeline** output; the **experiment pipeline** (`experiments/multi_session/multi_session.py`) reads this CSV via `data_path` and does not perform any session extraction.
+**Purpose**: Generate a single Parquet with **one row per temporal window** across many sessions. This is the **dataset pipeline** output; the **experiment pipeline** (`experiments/multi_session/multi_session.py`) reads this Parquet via `data_path` and does not perform any session extraction.
 
-Each row in the CSV has:
+Each row in the Parquet has:
 
 - **`session_id`**: ecephys session ID.
 - **`window_id`**: unique integer ID for the window.
 - **`window_start_ms` / `window_end_ms`**: window bounds in milliseconds (session time).
-- **`events_units`**: array-like of unit IDs for all spikes in the window.
-- **`events_times_ms`**: array-like of spike times (ms, relative to `window_start_ms`), aligned with `events_units`.
-- **`stimulus`**: JSON string with stimulus events in that window (times relative to window start).
-- **`behavior`**: JSON string with behavioral events in that window (times relative to window start).
+- **`events_units`**: native NumPy arrays (np.int32) natively serialized in Parquet.
+- **`events_times_ms`**: native NumPy arrays (np.float32) natively serialized in Parquet.
+- **`stimulus`**: native Python lists of dictionaries (times relative to window start).
+- **`behavior`**: native Python lists of dictionaries (times relative to window start).
 
 This is exactly the structure expected by `load_and_prepare_data` in `experiments/multi_session/multi_session.py`.
 
@@ -96,9 +96,9 @@ This is exactly the structure expected by `load_and_prepare_data` in `experiment
 
 `create_dataset.py` reads a YAML config that specifies:
 
-- **`data_path`**: output CSV path. Use this same path as `data_path` in your **experiment config** when running `multi_session.py`.
+- **`data_path`**: output Parquet path. Use this same path as `data_path` in your **experiment config** when running `multi_session.py`.
 - **`dataset_config`**:
-  - **`cache_dir`**: path to `visual_behavior_neuropixels_data` (Allen cache).
+  - **`cache_dir`**: path to `visual_behavior_neuropixels_data` (Allen cache). **(Note: The Allen Visual Behavior Neuropixels dataset is hundreds of gigabytes. The initial session extraction via allensdk will take significant time and disk space.)**
   - **`session_ids`**: explicit list of ecephys session IDs to include.
   - **`session_filter`**: (planned) criteria to select sessions (e.g. genotype, experience level, brain areas, min units).  
     Currently, the implementation expects `session_ids` to be provided explicitly.
@@ -109,7 +109,7 @@ This is exactly the structure expected by `load_and_prepare_data` in `experiment
 A minimal example:
 
 ```yaml
-data_path: ./datasets/visual_cortex_windows.csv
+data_path: ./datasets/visual_cortex_windows.parquet
 
 dataset_config:
   cache_dir: ./visual_behavior_neuropixels_data
@@ -138,9 +138,9 @@ The script will:
 - Validate the config.
 - For each selected session:
   - Load and preprocess data via `VBNDataHandler` and `NeuropixelsPreprocessor`.
-  - Bin spikes around events using the specified `bin_size_ms`.
+  - Extract exact sub-millisecond spike times within intervals using temporaldata.IrregularTimeSeries without manual binning.
   - Slide a window of length `window_size_ms` with stride `stride_ms`.
   - Build rows with `events_units`, `events_times_ms`, `stimulus`, and `behavior`.
 - Concatenate all windows into a single `pandas.DataFrame` and write it to `data_path`.
 
-Then run the **experiment pipeline** (step 2) with a config whose `data_path` points to this CSV. See [experiments/README.md](../README.md) for the two-pipeline overview.
+Then run the **experiment pipeline** (step 2) with a config whose `data_path` points to this Parquet. See [experiments/README.md](../README.md) for the two-pipeline overview.
