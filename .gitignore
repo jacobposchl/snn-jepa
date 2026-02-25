@@ -14,8 +14,6 @@ preprocessed/
 runs/
 .venv/
 .github/
-out/
-temp_tests/
 
 # macOS system files
 .DS_Store
