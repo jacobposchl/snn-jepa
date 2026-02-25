@@ -3,9 +3,9 @@ data_path: ./datasets/test_windows.parquet
 dataset_config:
   cache_dir: ../../../visual_behavior_neuropixels_data/
 
-  # Small set of sessions for smoke-testing the pipeline.
+  # Small set of sessions for testing the pipeline.
   # You can replace these with any valid ecephys session IDs.
-  session_ids: [1064415305]
+  session_ids: [1064415305, 1047969464, 1048189115]
 
   # Limit to primary visual cortex areas; set to [] or omit
   # to include all available areas.

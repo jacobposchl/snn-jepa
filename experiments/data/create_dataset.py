@@ -48,15 +48,18 @@ def _load_and_validate_config(config_path: Path) -> Dict[str, Any]:
             "dataset_config.session_ids must be a non-empty list of ecephys session IDs."
         )
 
+    # filter data by provided brain areas, or grab all brain areas
     brain_areas = dataset_cfg.get("brain_areas") or []
     if brain_areas and not isinstance(brain_areas, list):
         raise ValueError("dataset_config.brain_areas must be a list if provided.")
 
+    # filter the data by quality metrics; use defaults if not provided in config
     quality_cfg = dataset_cfg.get("quality") or {}
     min_snr = float(quality_cfg.get("min_snr", 1.0))
     min_firing_rate = float(quality_cfg.get("min_firing_rate", 0.1))
     max_isi_violations = float(quality_cfg.get("max_isi_violations", 1.0))
 
+    # set window parameters; use defaults if not provided in config
     windowing_cfg = dataset_cfg.get("windowing") or {}
     bin_size_ms = float(windowing_cfg.get("bin_size_ms", 10.0))
     window_size_ms = float(windowing_cfg.get("window_size_ms", 400.0))
@@ -111,6 +114,7 @@ def _build_session_windows(
         print(f"  Skipping session {session_id}: failed to load ({e})")
         return [], next_window_id
 
+    # preprocess data using the prepressing script in jepsyn.
     preproc = (
         NeuropixelsPreprocessor(session)
         .validate_integrity()
@@ -158,6 +162,7 @@ def _build_session_windows(
     all_spike_times = all_spike_times[sort_idx]
     all_unit_ids = all_unit_ids[sort_idx]
 
+    # use temporadata to generate a time series of spiking events
     # IrregularTimeSeries: timestamps in seconds, unit_id per spike
     spike_ts = td.IrregularTimeSeries(
         timestamps=all_spike_times,

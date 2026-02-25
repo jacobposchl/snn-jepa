@@ -9,7 +9,7 @@ SNN-JEPA is a self-supervised learning framework for learning compact, informati
 - **`jepsyn/data`**: `VBNDataHandler` for the Allen Visual Behavior Neuropixels dataset and `NeuropixelsPreprocessor` for cleaning, filtering, and binning spikes.
 - **`jepsyn/plots`**: Utilities for loss curves, latent-space metrics, spike count distributions, and prediction diagnostics.
 
-### 📁 Project structure
+### Project structure
 
 - **`jepsyn/`**: Core library code (models, losses, data, plotting, utils).
 - **`experiments/single_session/`**: Proof-of-concept training + distillation on a single ecephys session.
@@ -74,4 +74,4 @@ The single-session experiment writes to `runs/proof_of_concept/run_*`:
 - Training and validation loss curves for JEPA.
 - Latent prediction vs target diagnostics.
 - Spike count distributions.
-- CCA similarity and homeostatic penalty traces for SNN distillation.
+- C CA similarity and homeostatic penalty traces for SNN distillation.

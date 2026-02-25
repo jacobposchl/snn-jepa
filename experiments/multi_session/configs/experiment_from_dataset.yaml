@@ -4,7 +4,7 @@
 # Then point data_path below at the output Parquet.
 
 # Path to the windowed Parquet produced by the dataset pipeline (required).
-data_path: ./datasets/visual_cortex_windows.parquet
+data_path: ./datasets/test_windows.parquet
 
 # Output paths (optional)
 results_out_path:
