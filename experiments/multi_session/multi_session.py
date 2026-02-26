@@ -402,10 +402,6 @@ def evaluate_model(model: Any, test_data: Any, stage: str) -> pd.DataFrame:
         context_encoder = model["context_encoder"].to(device).eval()
         target_encoder  = model["target_encoder"].to(device).eval()
         predictor       = model["predictor"].to(device).eval()
-        # ---- Validation ----
-        #context_encoder.eval()
-        #target_encoder.eval()
-        #predictor.eval()
     all_metrics = []
 
     with torch.no_grad():
@@ -431,6 +427,8 @@ def evaluate_model(model: Any, test_data: Any, stage: str) -> pd.DataFrame:
                     "stage":           stage, # LeJEPA or SNN model
                     "pred_loss":       pred_loss.item(), # prediction metric
                     "cos_similarity":  cos_similarity.item(), # context vs target reps
+                    "h_ctx":           h_ctx.cpu().numpy(), # latent vectors for plotting
+                    "session_ids":     session_ids.cpu().numpy(), # for coloring plot
                     # more metrics? reconstruction
                 })
 
@@ -460,24 +458,106 @@ def save_results(
     # - Save metrics to CSV
     # - Generate plots (training curves, latent space, etc.)
     # - Save figures to output directory
+
+    # pull output dir from config; skip if not set
     results_path = config.get("results_out_path")
+    if not results_path:
+        print("No results_out_path in config; skip saving metrics.")
+        return
     
+    # create folder (results / LeJEPA /training)
     out_dir = Path(results_path) / stage / phase
-    out_dir.mkdir(parents=True, exists=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # Saving metrics to CSV
     csv_path = out_dir / "metrics.csv"
     metrics.to_csv(csv_path, index=False)
+    # drop array columns h_ctx, session_ids from CSV (used in latent space plot)
+    metrics.drop(columns=["h_ctx", "session_ids"], errors="ignore").to_csv(csv_path, index=False)
+    print(f"Saved metrics to {csv_path}")
 
-    # Generate plots
+    # Generate plots (training curves, latent space, etc.)
     import matplotlib.pyplot as plt
+    import numpy as np
 
     if phase == "training":
-        #train_loss here
+        # training curves
+        # two subplots (total loss, pred/reg loss)
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        fig.suptitle(f"{stage} - Training Curves")
+        # train_loss here
+        # plot train vs val total loss across epochs
+        if "train_loss" in metrics.columns:
+            axes[0].plot(metrics["epoch"], metrics["train_loss"], label="train")
+            axes[0].plot(metrics["epoch"], metrics["val_loss"], label="val")
+            axes[0].set_xlabel("Epoch")
+            axes[0].set_ylabel("Loss")
+            axes[0].set_title("Total Loss")
+            axes[0].legend()
         #train_pred_loss here
+        # plot pred loss vs reg loss across epochs
+        if "train_pred_loss" in metrics.columns:
+            axes[1].plot(metrics["epoch"], metrics["train_pred_loss"], label="pred loss")
+            axes[1].plot(metrics["epoch"], metrics["train_reg_loss"], label="reg loss")
+            axes[1].set_xlabel("Epoch")
+            axes[1].set_ylabel("Loss")
+            axes[1].set_title("Pred vs Reg Loss")
+            axes[1].legend()
+        
+        # Save figures to output directory
+        fig_path = out_dir / "training_curves.png"
+        plt.tight_layout()
+        plt.savefig(fig_path)
+        plt.close()
+        print(f"Saved training curves to {fig_path}")
 
     elif phase == "test":
         #test metrics here
+        # avg each metric across all test batches for single summary val
+        fig, ax = plt.subplots(figsize=(6, 4))
+        mean_metrics = metrics[["pred_loss", "cos_similarity"]].mean()
+        ax.bar(mean_metrics.index, mean_metrics.values)
+        ax.set_ylabel("Value")
+        ax.set_title(f"{stage} - Mean Test Metrics")
+        plt.tight_layout()
+        plt.savefig(out_dir / "test_metrics.png")
+        plt.close()
+        print(f"Saved test metrics to {out_dir / 'test_metrics.png'}")
+
+        # latent space plot
+        # with h_ctx from evaluate_model()
+        if "h_ctx" in metrics.columns:
+            try:
+                import umap
+                #stacks all batches into 1 array [N, D]
+                latent_vectors = np.vstack(metrics["h_ctx"].values)
+                session_labels = np.concatenate(metrics["session_ids"].values)
+                #reduce to 2D for visualization
+                reducer = umap.UMAP(n_components=2, random_state=42)
+                embeddings2d = reducer.fit_transform(latent_vectors)
+                #scatter plot colored by session id to reveal the learned structure
+                fig, ax = plt.subplots(figsize=(8, 6))
+                scatter = ax.scatter(
+                    embeddings2d[:, 0],
+                    embeddings2d[:, 1],
+                    c=session_labels,
+                    cmap="tab10",
+                    alpha=0.5,
+                    s=10,
+                )
+                plt.colorbar(scatter, ax=ax, label="Session ID")
+                ax.set_title(f"{stage} - Latent Space (UMAP)")
+                ax.set_xlabel("DIM 1")
+                ax.set_ylabel("DIM 2")
+                plt.tight_layout()
+                plt.savefig(out_dir / "latent_space.png")
+                plt.close()
+                print(f"Saved latent space plot to {out_dir / 'latent_space.png'}")
+
+            except ImportError:
+                # skip if umap-learn not installed (need to still)
+                print("umap-learn not installed; skipping latent space plot.")
+        
 
 def main(config_path: Path) -> None:
     """
