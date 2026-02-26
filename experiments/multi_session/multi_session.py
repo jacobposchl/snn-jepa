@@ -395,7 +395,53 @@ def evaluate_model(model: Any, test_data: Any, stage: str) -> pd.DataFrame:
     # - Run inference on test data
     # - Compute metrics (reconstruction, prediction, etc.)
     # - Return results dataframe
-    pass
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if stage == "LeJEPA":
+        context_encoder = model["context_encoder"].to(device).eval()
+        target_encoder  = model["target_encoder"].to(device).eval()
+        predictor       = model["predictor"].to(device).eval()
+        # ---- Validation ----
+        #context_encoder.eval()
+        #target_encoder.eval()
+        #predictor.eval()
+    all_metrics = []
+
+    with torch.no_grad():
+        for batch in test_data:
+            session_ids = batch["session_ids"].to(device)
+            unit_ids    = batch["unit_ids"].to(device)
+            time_ids    = batch["time_ids"].to(device)
+            attn_mask   = batch["attention_mask"].to(device)
+
+            if stage == "LeJEPA":
+                Z_ctx, h_ctx = context_encoder(session_ids, unit_ids, time_ids, attn_mask)
+                _,     h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
+                Z_pred       = predictor(Z_ctx)
+                h_pred       = Z_pred.mean(dim=1)   # [B, D]
+
+                # MSE between predicted and target reps
+                # pred_loss = MSE(Z_pred, Z_tgt) over all [B, L, D] latent slots
+                pred_loss = torch.nn.functional.mse_loss(h_pred, h_tgt)
+                # The cosine similarity between context and target representations
+                cos_similarity = torch.nn.functional.cosine_similarity(h_ctx, h_tgt).mean()
+
+                all_metrics.append({
+                    "stage":           stage, # LeJEPA or SNN model
+                    "pred_loss":       pred_loss.item(), # prediction metric
+                    "cos_similarity":  cos_similarity.item(), # context vs target reps
+                    # more metrics? reconstruction
+                })
+
+            # if stage == "SNN": ...
+    
+    # Return results dataframe (use with save_results())
+    results_df = pd.DataFrame(all_metrics)
+    print(f"\n[{stage}] Evaluation Metrics:")
+    print(results_df.mean(numeric_only=True).to_string())
+    return results_df
+    #when to try implementing RoPE?
 
 
 def save_results(
@@ -414,8 +460,24 @@ def save_results(
     # - Save metrics to CSV
     # - Generate plots (training curves, latent space, etc.)
     # - Save figures to output directory
-    pass
+    results_path = config.get("results_out_path")
+    
+    out_dir = Path(results_path) / stage / phase
+    out_dir.mkdir(parents=True, exists=True)
 
+    # Saving metrics to CSV
+    csv_path = out_dir / "metrics.csv"
+    metrics.to_csv(csv_path, index=False)
+
+    # Generate plots
+    import matplotlib.pyplot as plt
+
+    if phase == "training":
+        #train_loss here
+        #train_pred_loss here
+
+    elif phase == "test":
+        #test metrics here
 
 def main(config_path: Path) -> None:
     """
