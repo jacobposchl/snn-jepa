@@ -46,18 +46,18 @@ def sigreg(embeddings, global_step, num_slices):
     err = (ecf - exp_f).abs().square().mul(exp_f)
 
     N = embeddings.size(0) * (dist.get_world_size() if dist.is_initialized() else 1)
-    T = torch.trapz(err, t, dim = 1) * N
+    T = torch.trapezoid(err, t, dim=1) * N
 
     return T.mean()
 
 def lejepa_loss(z_context, z_target, z_predicted, global_step, lambd, num_slices):
     """
-    LeJEPA loss for temporal prediction on neural data.
-    
+    LeJEPA loss for masking JEPA on neural data.
+
     Args:
-        z_context: Context embeddings at time t, shape (bs, D)
-        z_target: Target embeddings at time t+Δt, shape (bs, D)
-        z_predicted: Predicted future embeddings from predictor(z_context), shape (bs, D)
+        z_context: Mean-pooled context embeddings (masked input), shape (bs, D)
+        z_target: Mean-pooled target embeddings (full input, EMA encoder), shape (bs, D)
+        z_predicted: Mean-pooled predicted embeddings from predictor(Z_ctx), shape (bs, D)
         global_step: Current training step
         lambd: Trade-off between prediction and SIGReg (default 0.05)
         num_slices: Number of projections for SIGReg (default 1024)

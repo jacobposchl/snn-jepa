@@ -2,10 +2,11 @@
 
 This folder is the **dataset pipeline**: extract sessions from the Allen cache and write a single windowed Parquet. Run this **once** (or when you change sessions/regions/windowing); the experiment pipeline then uses the saved Parquet and does not re-extract sessions.
 
-Current entry points:
+Entry points:
 
 - **`data_analysis.py`**: interactive exploration of sessions and metadata (to choose sessions/regions for the dataset).
 - **`create_dataset.py`**: batch creation of a preprocessed Parquet dataset consumed by the **experiment pipeline** (`experiments/multi_session/multi_session.py`).
+- **`verify_dataset.py`**: sanity-check a Parquet before running experiments — validates schema, checks for session-count and integrity issues, and generates diagnostic plots.
 
 ---
 
@@ -86,7 +87,7 @@ Each row in the Parquet has:
 - **`window_id`**: unique integer ID for the window.
 - **`window_start_ms` / `window_end_ms`**: window bounds in milliseconds (session time).
 - **`events_units`**: native NumPy arrays (np.int32) natively serialized in Parquet.
-- **`events_times_ms`**: native NumPy arrays (np.float32) natively serialized in Parquet.
+- **`events_times_ms`**: native NumPy arrays (np.float32) natively serialized in Parquet — ms offsets **relative to `window_start_ms`**, so values are in `[0, window_size_ms)`.
 - **`stimulus`**: native Python lists of dictionaries (times relative to window start).
 - **`behavior`**: native Python lists of dictionaries (times relative to window start).
 
@@ -100,7 +101,7 @@ This is exactly the structure expected by `load_and_prepare_data` in `experiment
 - **`dataset_config`**:
   - **`cache_dir`**: path to `visual_behavior_neuropixels_data` (Allen cache). **(Note: The Allen Visual Behavior Neuropixels dataset is hundreds of gigabytes. The initial session extraction via allensdk will take significant time and disk space.)**
   - **`session_ids`**: explicit list of ecephys session IDs to include.
-  - **`session_filter`**: (planned) criteria to select sessions (e.g. genotype, experience level, brain areas, min units).  
+  - **`session_filter`**: (planned) criteria to select sessions (e.g. genotype, experience level, brain areas, min units).
     Currently, the implementation expects `session_ids` to be provided explicitly.
   - **`brain_areas`**: list of areas to keep (e.g. `["VISp", "VISl"]`).
   - **`quality`**: SNR / firing rate / ISI thresholds.
@@ -144,3 +145,28 @@ The script will:
 - Concatenate all windows into a single `pandas.DataFrame` and write it to `data_path`.
 
 Then run the **experiment pipeline** (step 2) with a config whose `data_path` points to this Parquet. See [experiments/README.md](../README.md) for the two-pipeline overview.
+
+---
+
+### Using `verify_dataset.py` (sanity-check before training)
+
+**Purpose**: Validate a Parquet produced by `create_dataset.py` before handing it to the experiment pipeline. Run this after building a new dataset to catch issues early.
+
+```bash
+python -m experiments.data.verify_dataset path/to/dataset.parquet
+```
+
+Checks performed:
+
+- **Schema**: all required columns (`session_id`, `window_id`, `window_start_ms`, `window_end_ms`, `events_units`, `events_times_ms`, `stimulus`, `behavior`) are present.
+- **Session count**: at least 3 unique sessions exist (required for train/val/test split in `multi_session.py`).
+- **Window integrity**: no `window_id` has conflicting timestamps (mirrors the check in `load_and_prepare_data`).
+- **Array alignment**: `events_units` and `events_times_ms` have equal length in every row.
+- **Spike statistics**: total spike count, average spikes per window, approximate population firing rate, and global time bounds.
+
+Generated plots (saved next to the Parquet as `dataset_verification_advanced.png`):
+
+- **Raster**: spike times vs unit IDs for one sample window.
+- **Spike distribution**: histogram of spike counts per window.
+- **Global PSTH**: population spike histogram across all windows.
+- **Per-session PSTH**: normalized per-session spike densities overlaid for comparison.
