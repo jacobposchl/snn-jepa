@@ -154,8 +154,8 @@ def train_lejepa(
         predictor        (narrow Transformer)     — maps Z_ctx → Z_pred ≈ Z_tgt
 
     Loss per batch:
-        pred_loss = MSE(Z_pred, Z_tgt)             over all [B, L, D] latent slots
-        reg_loss  = SIGReg(h_ctx) + SIGReg(h_tgt) on pooled [B, D] representations
+        pred_loss = MSE(h_pred, h_tgt)             on mean-pooled [B, D] representations
+        reg_loss  = SIGReg(h_ctx) + SIGReg(h_tgt) on mean-pooled [B, D] representations
         total     = (1 - lambd) * pred_loss + lambd * reg_loss
 
     The optimizer updates only context_encoder + predictor.
@@ -417,8 +417,7 @@ def evaluate_model(model: Any, test_data: Any, stage: str) -> pd.DataFrame:
                 Z_pred       = predictor(Z_ctx)
                 h_pred       = Z_pred.mean(dim=1)   # [B, D]
 
-                # MSE between predicted and target reps
-                # pred_loss = MSE(Z_pred, Z_tgt) over all [B, L, D] latent slots
+                # MSE between predicted and target mean-pooled reps [B, D]
                 pred_loss = torch.nn.functional.mse_loss(h_pred, h_tgt)
                 # The cosine similarity between context and target representations
                 cos_similarity = torch.nn.functional.cosine_similarity(h_ctx, h_tgt).mean()
@@ -469,10 +468,8 @@ def save_results(
     out_dir = Path(results_path) / stage / phase
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Saving metrics to CSV
+    # Saving metrics to CSV (drop array columns used only for latent space plot)
     csv_path = out_dir / "metrics.csv"
-    metrics.to_csv(csv_path, index=False)
-    # drop array columns h_ctx, session_ids from CSV (used in latent space plot)
     metrics.drop(columns=["h_ctx", "session_ids"], errors="ignore").to_csv(csv_path, index=False)
     print(f"Saved metrics to {csv_path}")
 
@@ -557,7 +554,33 @@ def save_results(
             except ImportError:
                 # skip if umap-learn not installed (need to still)
                 print("umap-learn not installed; skipping latent space plot.")
-        
+
+    elif phase == "distillation":
+        # distillation training curves (total loss, pred loss vs homeostatic penalty)
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        fig.suptitle(f"{stage} - Distillation Curves")
+        if "train_loss" in metrics.columns:
+            axes[0].plot(metrics["epoch"], metrics["train_loss"], label="train")
+            if "val_loss" in metrics.columns:
+                axes[0].plot(metrics["epoch"], metrics["val_loss"], label="val")
+            axes[0].set_xlabel("Epoch")
+            axes[0].set_ylabel("Loss")
+            axes[0].set_title("Total Loss")
+            axes[0].legend()
+        if "distill_loss" in metrics.columns:
+            axes[1].plot(metrics["epoch"], metrics["distill_loss"], label="distill loss")
+            if "homeo_loss" in metrics.columns:
+                axes[1].plot(metrics["epoch"], metrics["homeo_loss"], label="homeostatic loss")
+            axes[1].set_xlabel("Epoch")
+            axes[1].set_ylabel("Loss")
+            axes[1].set_title("Distill vs Homeostatic Loss")
+            axes[1].legend()
+        fig_path = out_dir / "distillation_curves.png"
+        plt.tight_layout()
+        plt.savefig(fig_path)
+        plt.close()
+        print(f"Saved distillation curves to {fig_path}")
+
 
 def main(config_path: Path) -> None:
     """
@@ -590,15 +613,19 @@ def main(config_path: Path) -> None:
 
     print("\n" + "=" * 60)
     print("Distilling into Spiking Neural Network")
-    snn_model, snn_train_metrics = distill_snn(config, jepa_model, train_data, val_data)
-    save_results(stage="SNN", phase="distillation", metrics=snn_train_metrics, config=config)
-    print("SNN distillation complete")
+    snn_result = distill_snn(config, jepa_model, train_data, val_data)
+    if snn_result is not None:
+        snn_model, snn_train_metrics = snn_result
+        save_results(stage="SNN", phase="distillation", metrics=snn_train_metrics, config=config)
+        print("SNN distillation complete")
 
-    print("\n" + "=" * 60)
-    print("Evaluating Distilled SNN on Test Set")
-    snn_test_metrics = evaluate_model(snn_model, test_data, stage="SNN")
-    save_results(stage="SNN", phase="test", metrics=snn_test_metrics, config=config)
-    print("SNN evaluation complete")
+        print("\n" + "=" * 60)
+        print("Evaluating Distilled SNN on Test Set")
+        snn_test_metrics = evaluate_model(snn_model, test_data, stage="SNN")
+        save_results(stage="SNN", phase="test", metrics=snn_test_metrics, config=config)
+        print("SNN evaluation complete")
+    else:
+        print("SNN distillation not yet implemented; skipping.")
 
     print("\n" + "=" * 60)
     print("Multi-Session Experiment Complete!")
