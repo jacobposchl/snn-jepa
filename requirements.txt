@@ -54,7 +54,7 @@ networkx==3.4.2
 numexpr==2.14.1
 numpy==1.23.5
 omegaconf==2.3.0
-packaging @ file:///opt/miniconda3/conda-bld/packaging_1761049079158/work
+packaging
 pandas==1.5.3
 patsy==1.0.2
 pillow==12.1.0
