@@ -388,7 +388,7 @@ def distill_snn(
     pass
 
 
-def evaluate_model(model: Any, test_data: Any, stage: str) -> pd.DataFrame:
+def evaluate_model(model: Any, test_data: Any, stage: str, mask_ratio: float = 0.5) -> pd.DataFrame:
     """
     Evaluate a trained model on test data.
 
@@ -396,15 +396,14 @@ def evaluate_model(model: Any, test_data: Any, stage: str) -> pd.DataFrame:
         model: Trained model bundle
         test_data: Test DataLoader
         stage: Model stage name ("LeJEPA" or "SNN")
+        mask_ratio: Fraction of real tokens to mask, matching training conditions for pred_loss eval
 
     Returns:
-        DataFrame containing evaluation metrics
+        DataFrame containing per-batch evaluation metrics.
+        Includes h_ctx, session_ids, is_change, stim_block arrays for downstream plotting/probing.
     """
-    # TODO: Implement evaluation
-    # - Run inference on test data
-    # - Compute metrics (reconstruction, prediction, etc.)
-    # - Return results dataframe
-    
+    import numpy as np
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if stage == "LeJEPA":
@@ -421,31 +420,64 @@ def evaluate_model(model: Any, test_data: Any, stage: str) -> pd.DataFrame:
             attn_mask   = batch["attention_mask"].to(device)
 
             if stage == "LeJEPA":
-                Z_ctx, h_ctx = context_encoder(session_ids, unit_ids, time_ids, attn_mask)
+                # Apply masking to match training conditions — gives an honest pred_loss
+                ctx_mask = create_context_mask(attn_mask, mask_ratio)
+                Z_ctx, h_ctx = context_encoder(session_ids, unit_ids, time_ids, ctx_mask)
                 _,     h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
                 Z_pred       = predictor(Z_ctx)
                 h_pred       = Z_pred.mean(dim=1)   # [B, D]
 
-                # MSE between predicted and target mean-pooled reps [B, D]
-                pred_loss = torch.nn.functional.mse_loss(h_pred, h_tgt)
-                # The cosine similarity between context and target representations
+                pred_loss      = torch.nn.functional.mse_loss(h_pred, h_tgt)
                 cos_similarity = torch.nn.functional.cosine_similarity(h_ctx, h_tgt).mean()
 
+                # Stimulus labels (present only when test_data was built with include_labels=True)
+                labels     = batch.get("labels", [])
+                B          = session_ids.size(0)
+                is_change  = np.array([lb["is_change"]      for lb in labels], dtype=bool) \
+                             if labels else np.zeros(B, dtype=bool)
+                stim_block = np.array([lb["stimulus_block"] for lb in labels], dtype=int) \
+                             if labels else np.full(B, -1, dtype=int)
+
                 all_metrics.append({
-                    "stage":           stage, # LeJEPA or SNN model
-                    "pred_loss":       pred_loss.item(), # prediction metric
-                    "cos_similarity":  cos_similarity.item(), # context vs target reps
-                    "h_ctx":           h_ctx.cpu().numpy(), # latent vectors for plotting
-                    "session_ids":     session_ids.cpu().numpy(), # for coloring plot
-                    # more metrics? reconstruction
+                    "stage":          stage,
+                    "pred_loss":      pred_loss.item(),
+                    "cos_similarity": cos_similarity.item(),
+                    "h_ctx":          h_ctx.cpu().numpy(),
+                    "session_ids":    session_ids.cpu().numpy(),
+                    "is_change":      is_change,
+                    "stim_block":     stim_block,
                 })
 
             # if stage == "SNN": ...
-    
-    # Return results dataframe (use with save_results())
+
     results_df = pd.DataFrame(all_metrics)
     print(f"\n[{stage}] Evaluation Metrics:")
     print(results_df.mean(numeric_only=True).to_string())
+
+    # Linear probe: can is_change be decoded linearly from the frozen representations?
+    if stage == "LeJEPA" and "is_change" in results_df.columns:
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.model_selection import cross_val_score
+        from sklearn.preprocessing import StandardScaler
+
+        all_h      = np.vstack(results_df["h_ctx"].values)           # [N, D]
+        all_change = np.concatenate(results_df["is_change"].values)  # [N] bool
+        all_block  = np.concatenate(results_df["stim_block"].values) # [N] int
+
+        # Only windows that actually had a stimulus event (stim_block == -1 means none)
+        valid = all_block >= 0
+        if valid.sum() >= 10:
+            X = StandardScaler().fit_transform(all_h[valid])
+            y = all_change[valid].astype(int)
+            clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
+            scores = cross_val_score(clf, X, y, cv=5, scoring="balanced_accuracy")
+            print(
+                f"\n[{stage}] Linear probe (is_change) — 5-fold balanced accuracy: "
+                f"{scores.mean():.3f} ± {scores.std():.3f}  (random baseline = 0.500)"
+            )
+        else:
+            print(f"\n[{stage}] Not enough labeled stimulus windows for linear probe ({valid.sum()} found).")
+
     return results_df
     #when to try implementing RoPE?
 
@@ -479,7 +511,7 @@ def save_results(
 
     # Saving metrics to CSV (drop array columns used only for latent space plot)
     csv_path = out_dir / "metrics.csv"
-    metrics.drop(columns=["h_ctx", "session_ids"], errors="ignore").to_csv(csv_path, index=False)
+    metrics.drop(columns=["h_ctx", "session_ids", "is_change", "stim_block"], errors="ignore").to_csv(csv_path, index=False)
     print(f"Saved metrics to {csv_path}")
 
     # Generate plots (training curves, latent space, etc.)
@@ -560,6 +592,32 @@ def save_results(
                 plt.close()
                 print(f"Saved latent space plot to {out_dir / 'latent_space.png'}")
 
+                # Second UMAP colored by is_change (stimulus windows only)
+                if "is_change" in metrics.columns and "stim_block" in metrics.columns:
+                    all_change = np.concatenate(metrics["is_change"].values).astype(int)
+                    all_block  = np.concatenate(metrics["stim_block"].values)
+                    valid      = all_block >= 0
+                    if valid.sum() >= 10:
+                        fig, ax = plt.subplots(figsize=(8, 6))
+                        ax.scatter(
+                            embeddings2d[~valid, 0], embeddings2d[~valid, 1],
+                            c="lightgray", alpha=0.2, s=8, label="no stimulus",
+                        )
+                        for val, label, color in [(0, "no change", "steelblue"), (1, "change", "tomato")]:
+                            mask = valid & (all_change == val)
+                            ax.scatter(
+                                embeddings2d[mask, 0], embeddings2d[mask, 1],
+                                c=color, alpha=0.6, s=10, label=label,
+                            )
+                        ax.legend()
+                        ax.set_title(f"{stage} - Latent Space by Change Detection (UMAP)")
+                        ax.set_xlabel("DIM 1")
+                        ax.set_ylabel("DIM 2")
+                        plt.tight_layout()
+                        plt.savefig(out_dir / "latent_space_change.png")
+                        plt.close()
+                        print(f"Saved change UMAP to {out_dir / 'latent_space_change.png'}")
+
             except ImportError:
                 # skip if umap-learn not installed (need to still)
                 print("umap-learn not installed; skipping latent space plot.")
@@ -616,7 +674,8 @@ def main(config_path: Path) -> None:
 
     print("\n" + "=" * 60)
     print("Evaluating LeJEPA on Test Set")
-    jepa_test_metrics = evaluate_model(jepa_model, test_data, stage="LeJEPA")
+    _mask_ratio = config.get("training_config", {}).get("mask_ratio", 0.5)
+    jepa_test_metrics = evaluate_model(jepa_model, test_data, stage="LeJEPA", mask_ratio=_mask_ratio)
     save_results(stage="LeJEPA", phase="test", metrics=jepa_test_metrics, config=config)
     print("LeJEPA evaluation complete")
 
