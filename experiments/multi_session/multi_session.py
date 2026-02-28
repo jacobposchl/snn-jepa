@@ -469,12 +469,19 @@ def evaluate_model(model: Any, test_data: Any, stage: str, mask_ratio: float = 0
         if valid.sum() >= 10:
             X = StandardScaler().fit_transform(all_h[valid])
             y = all_change[valid].astype(int)
-            clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
-            scores = cross_val_score(clf, X, y, cv=5, scoring="balanced_accuracy")
-            print(
-                f"\n[{stage}] Linear probe (is_change) — 5-fold balanced accuracy: "
-                f"{scores.mean():.3f} ± {scores.std():.3f}  (random baseline = 0.500)"
-            )
+            n_classes = len(np.unique(y))
+            if n_classes < 2:
+                print(
+                    f"\n[{stage}] Linear probe skipped — only one class present in labeled test windows "
+                    f"(all is_change={bool(y[0])}). Try a different random_state or train/test split."
+                )
+            else:
+                clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
+                scores = cross_val_score(clf, X, y, cv=5, scoring="balanced_accuracy")
+                print(
+                    f"\n[{stage}] Linear probe (is_change) — 5-fold balanced accuracy: "
+                    f"{scores.mean():.3f} ± {scores.std():.3f}  (random baseline = 0.500)"
+                )
         else:
             print(f"\n[{stage}] Not enough labeled stimulus windows for linear probe ({valid.sum()} found).")
 
