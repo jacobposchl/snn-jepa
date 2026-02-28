@@ -6,9 +6,9 @@
 # Example:
 #   data_path:        ../../../datasets/visp_visl_windows.parquet
 #   results_out_path: ../../../results/lejepa_visp_visl
-data_path:
-results_out_path:
-plots_out_path:
+data_path: ../../../datasets/visp_visl_windows.parquet
+results_out_path: ../../../results
+plots_out_path: ../../../plots
 
 # Data split sizes (by session_id)
 data:
