@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from jepsyn.data import REQUIRED_COLUMNS, SpikeWindowDataset, spike_collate_fn
 from jepsyn.losses import lejepa_loss
 from jepsyn.models import NeuralEncoder, NeuralPredictor
-from jepsyn.utils import create_context_mask, update_ema, verify_config
+from jepsyn.utils import apply_unit_dropout, create_context_mask, update_ema, verify_config
 
 
 def load_and_prepare_data(
@@ -178,13 +178,14 @@ def train_lejepa(
     # Encoder hyperparameters
     d_model      = model_cfg.get("d_model", 256)
     n_latents    = model_cfg.get("n_latents", 64)
-    max_time_ms  = model_cfg.get("max_time_ms", 400)
+    window_size_s = model_cfg.get("window_size_s", 0.4)
     encoder_type = model_cfg.get("encoder_type", "perceiver")
     encoder_kwargs = {
         k: model_cfg[k]
         for k in (
             "n_cross_attn_heads", "n_self_attn_layers", "n_self_attn_heads",
             "dim_feedforward", "dropout",
+            "rope_t_min", "rope_t_max", "use_delimiter_tokens",
         )
         if k in model_cfg
     }
@@ -207,6 +208,7 @@ def train_lejepa(
     mask_ratio   = train_cfg.get("mask_ratio", 0.5)
     lambd        = train_cfg.get("lambd", 0.05)
     num_slices   = train_cfg.get("num_slices", 256)
+    unit_dropout = train_cfg.get("unit_dropout", 0.0)
     results_path = config.get("results_out_path")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -217,7 +219,7 @@ def train_lejepa(
         session_unit_maps=unit_maps,
         d_model=d_model,
         n_latents=n_latents,
-        max_time_ms=max_time_ms,
+        window_size_s=window_size_s,
         encoder_type=encoder_type,
         **encoder_kwargs,
     ).to(device)
@@ -260,6 +262,11 @@ def train_lejepa(
 
             # Hide mask_ratio of real tokens from the context encoder.
             ctx_mask = create_context_mask(attn_mask, mask_ratio)
+
+            # Unit dropout: randomly drop a fraction of units per sample so the
+            # model learns to be robust to missing neurons (POYO augmentation).
+            if unit_dropout > 0.0:
+                ctx_mask = apply_unit_dropout(unit_ids, ctx_mask, dropout_ratio=unit_dropout)
 
             # Context encoder: sees only unmasked events, gradients flow.
             Z_ctx, h_ctx = context_encoder(session_ids, unit_ids, time_ids, ctx_mask)
@@ -433,7 +440,7 @@ def identify_units(
         for p in m.parameters():
             p.requires_grad_(False)
 
-    # --- Unfreeze only the test-session unit embedding tables in context_encoder ---
+    # --- Unfreeze test-session unit embedding tables in context_encoder ---
     params_to_optimize: List[torch.Tensor] = []
     for sid in test_session_ids:
         embed_table = context_encoder.encoder.unit_embeds[str(sid)]
@@ -445,15 +452,35 @@ def identify_units(
         print("[Unit ID] No test-session unit embeddings found; skipping.")
         return
 
+    # --- Also adapt session embedding rows for test sessions ---
+    # Use a gradient hook to zero out updates for training-session rows,
+    # so only the test-session rows are modified.
+    sess_embed_weight = context_encoder.encoder.session_embed.weight
+    test_sess_indices = [
+        context_encoder.encoder.session_id_to_idx[sid] for sid in test_session_ids
+    ]
+
+    def _mask_sess_grad(grad: torch.Tensor) -> torch.Tensor:
+        masked = torch.zeros_like(grad)
+        for idx in test_sess_indices:
+            masked[idx] = grad[idx]
+        return masked
+
+    sess_embed_weight.requires_grad_(True)
+    hook_handle = sess_embed_weight.register_hook(_mask_sess_grad)
+    params_to_optimize.append(sess_embed_weight)
+
     optimizer = torch.optim.Adam(params_to_optimize, lr=lr)
 
     context_encoder.train()
     target_encoder.eval()
     predictor.eval()
 
-    total_params = sum(p.numel() for p in params_to_optimize)
+    unit_params   = sum(p.numel() for p in params_to_optimize[:-1])
+    sess_params   = len(test_sess_indices) * context_encoder.encoder.d_model
+    total_params  = unit_params + sess_params
     print(
-        f"\n[Unit ID] Adapting {len(test_session_ids)} test-session unit tables "
+        f"\n[Unit ID] Adapting {len(test_session_ids)} test-session unit + session tables "
         f"({total_params:,} params) for {n_steps} steps  lr={lr}"
     )
 
@@ -499,8 +526,12 @@ def identify_units(
                     f"loss={total_loss.item():.4f} | pred={pred_loss.item():.4f}"
                 )
 
-    # Sync adapted unit embeddings from context_encoder → target_encoder
-    print("  Syncing adapted unit embeds → target encoder...")
+    # Remove gradient hook and re-freeze session embedding weight.
+    hook_handle.remove()
+    sess_embed_weight.requires_grad_(False)
+
+    # Sync adapted unit embeddings and session embedding → target_encoder.
+    print("  Syncing adapted unit embeds + session embed → target encoder...")
     with torch.no_grad():
         for sid in test_session_ids:
             sid_str = str(sid)
@@ -508,6 +539,10 @@ def identify_units(
             tgt = target_encoder.encoder.unit_embeds[sid_str]
             for p_src, p_tgt in zip(src.parameters(), tgt.parameters()):
                 p_tgt.copy_(p_src)
+        # Sync the full session embedding weight (only test rows changed due to the hook).
+        target_encoder.encoder.session_embed.weight.copy_(
+            context_encoder.encoder.session_embed.weight
+        )
 
     context_encoder.eval()
     print("[Unit ID] Done.\n")
