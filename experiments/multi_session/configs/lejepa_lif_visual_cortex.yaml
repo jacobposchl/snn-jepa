@@ -1,4 +1,11 @@
-# Paths (data_path must point to a Parquet from the dataset pipeline)
+# All paths below are relative to THIS config file's directory.
+# experiments/multi_session/configs/ is 3 levels below the repo root (snn-jepa/),
+# so ../../../ resolves to the repo root.
+#
+# data_path must point to the Parquet produced by create_dataset.py.
+# Example:
+#   data_path:        ../../../datasets/visp_visl_windows.parquet
+#   results_out_path: ../../../results/lejepa_visp_visl
 data_path:
 results_out_path:
 plots_out_path:

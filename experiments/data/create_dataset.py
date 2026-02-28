@@ -76,9 +76,13 @@ def _load_and_validate_config(config_path: Path) -> Dict[str, Any]:
             "windowing.window_size_ms must be an integer multiple of windowing.bin_size_ms."
         )
 
+    # Resolve relative paths relative to the config file's directory so that
+    # the config works correctly regardless of the working directory.
+    config_dir = config_path.resolve().parent
+
     return {
-        "data_path": Path(raw["data_path"]),
-        "cache_dir": Path(cache_dir),
+        "data_path": (config_dir / raw["data_path"]).resolve(),
+        "cache_dir": (config_dir / cache_dir).resolve(),
         "session_ids": [int(s) for s in session_ids],
         "brain_areas": brain_areas,
         "quality": {

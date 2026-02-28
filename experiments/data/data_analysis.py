@@ -11,14 +11,13 @@ Usage:
     python data_analysis.py --filter --animals <ids|all> --regions <areas> --units-required <counts> --phase <1|2>
 """
 
-from pathlib import Path
-
-# Add src to path for imports
-
-import pandas as pd
 import argparse
 from pathlib import Path
 from typing import Dict, List, Optional
+
+import pandas as pd
+from scipy.stats import norm
+
 from jepsyn.data.data_handler import VBNDataHandler
 
 
@@ -120,6 +119,7 @@ def filter_sessions_metadata(
     regions: Optional[List[str]],
     units_required: Optional[List[int]],
     phase: Optional[int],
+    experience_level: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Filter sessions using metadata tables only.
@@ -129,6 +129,7 @@ def filter_sessions_metadata(
         regions: Brain regions to include (e.g., ['VISp', 'CA1']).
         units_required: Minimum units per region (same length as regions).
         phase: Session number (1 or 2).
+        experience_level: Experience level to filter by ('Familiar' or 'Novel').
 
     Returns:
         Filtered sessions table.
@@ -138,6 +139,12 @@ def filter_sessions_metadata(
     # Filter by session phase
     if phase is not None:
         sessions = sessions[sessions['session_number'] == phase]
+
+    # Filter by experience level
+    if experience_level is not None:
+        sessions = sessions[
+            sessions['experience_level'].str.lower() == experience_level.lower()
+        ]
 
     # Filter by animals (mouse_id)
     animal_ids = _parse_animals(animals)
@@ -152,19 +159,24 @@ def filter_sessions_metadata(
         units = handler.units_table
         area_col = 'ecephys_structure_acronym' if 'ecephys_structure_acronym' in units.columns else 'structure_acronym'
 
+        # Normalize region names case-insensitively against the actual values in the data
+        # (e.g. user may pass "Visp" but the data stores "VISp")
+        upper_to_actual = {a.upper(): a for a in units[area_col].dropna().unique()}
+        normalized_regions = [upper_to_actual.get(r.upper(), r) for r in regions]
+
         # Build counts per session and region
         region_counts = (
-            units[units[area_col].isin(regions)]
+            units[units[area_col].isin(normalized_regions)]
             .groupby(['ecephys_session_id', area_col])
             .size()
             .unstack(fill_value=0)
         )
 
         # Enforce minimum unit counts per region
-        for region, min_units in zip(regions, units_required):
-            if region not in region_counts.columns:
-                region_counts[region] = 0
-            region_counts = region_counts[region_counts[region] >= min_units]
+        for norm_region, min_units in zip(normalized_regions, units_required):
+            if norm_region not in region_counts.columns:
+                region_counts[norm_region] = 0
+            region_counts = region_counts[region_counts[norm_region] >= min_units]
 
         eligible_session_ids = set(region_counts.index)
         sessions = sessions[sessions.index.isin(eligible_session_ids)]
@@ -239,9 +251,17 @@ def print_full_summary(handler: VBNDataHandler, session_ids: List[int]):
             print(f"STIMULUS BLOCKS BREAKDOWN ({len(info['stimulus_blocks'])} blocks)")
             print(f"{'─'*80}")
             
+            _BLOCK_LABELS = {
+                0: "Active",
+                1: "Gray Screen",
+                2: "RF Mapping (Gabors)",
+                3: "Gray Screen",
+                4: "Full-field Flashes",
+                5: "Passive/Replay",
+            }
             for block_id in sorted(info['stimulus_blocks'].keys()):
                 block = info['stimulus_blocks'][block_id]
-                block_type = "Active" if block_id == 0 else "Passive/Replay"
+                block_type = _BLOCK_LABELS.get(block_id, f"Block {block_id}")
                 
                 print(f"\nBlock {block_id} ({block_type}):")
                 print(f"  Duration: {block['duration_sec']:.1f} seconds ({block['duration_sec']/60:.2f} min)")
@@ -284,7 +304,7 @@ def print_full_summary(handler: VBNDataHandler, session_ids: List[int]):
                     print(f"\nPerformance Metrics:")
                     print(f"  Hit Rate: {hit_rate:.2%}")
                     print(f"  False Alarm Rate: {fa_rate:.2%}")
-                    dprime = 2.66 * (hit_rate - fa_rate) if (hit_rate > 0 and fa_rate < 1) else 0
+                    dprime = norm.ppf(max(0.01, min(0.99, hit_rate))) - norm.ppf(max(0.01, min(0.99, fa_rate)))
                     print(f"  d': {dprime:.2f}")
         
         except Exception as e:
@@ -305,7 +325,9 @@ if __name__ == '__main__':
                         help='Minimum units per region (same length as --regions)')
     parser.add_argument('--phase', type=int, choices=[1, 2],
                         help='Session phase: 1 (first) or 2 (second)')
-    parser.add_argument('--cache-dir', type=str, default='./visual_behavior_neuropixels_data', 
+    parser.add_argument('--experience-level', type=str, choices=['Familiar', 'Novel'],
+                        metavar='LEVEL', help='Experience level: Familiar or Novel (case-insensitive)')
+    parser.add_argument('--cache-dir', type=str, default='./visual_behavior_neuropixels_data',
                         help='Path to data cache directory')
     
     args = parser.parse_args()
@@ -329,14 +351,19 @@ if __name__ == '__main__':
             regions=args.regions,
             units_required=args.units_required,
             phase=args.phase,
+            experience_level=args.experience_level,
         )
         print("\nFILTERED SESSIONS")
         print("=" * 80)
-        print(f"Total matching sessions: {len(filtered)}")
+        print(f"Total matching sessions: {len(filtered)}\n")
         if len(filtered) > 0:
-            cols = ['mouse_id', 'session_number', 'image_set', 'experience_level', 'session_type']
-            available_cols = [c for c in cols if c in filtered.columns]
-            print(filtered[available_cols].sort_values(by=available_cols).to_string())
+            display_cols = ['mouse_id', 'session_number', 'experience_level', 'image_set', 'session_type']
+            available_cols = [c for c in display_cols if c in filtered.columns]
+            sorted_filtered = filtered[available_cols].sort_values(by=available_cols)
+            for session_id, row in sorted_filtered.iterrows():
+                fields = "  ".join(f"{col}={row[col]}" for col in available_cols)
+                print(f"  {session_id}  |  {fields}")
+            print(f"\nSession IDs: {sorted_filtered.index.tolist()}")
     else:
         # Default: print overview
         handler.print_dataset_overview()

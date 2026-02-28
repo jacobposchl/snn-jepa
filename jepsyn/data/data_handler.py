@@ -17,6 +17,7 @@ Example usage:
     stim = handler.get_stimulus_presentations(1064644573, stimulus_blocks=[0], active_only=True)
 """
 
+import ast
 import json
 from pathlib import Path
 from typing import Optional, Union, List, Dict, Any
@@ -419,7 +420,8 @@ class VBNDataHandler:
                     session = self.load_session(session_id)
                     if len(session.units) >= min_units:
                         valid_ids.append(session_id)
-                except Exception:
+                except Exception as e:
+                    print(f"Warning: skipping session {session_id} during unit count check: {e}")
                     continue
             return valid_ids
         
@@ -582,9 +584,16 @@ class VBNDataHandler:
         Returns:
             List of unit IDs that are putatively optotagged
         """
+        baseline_dur = baseline_window[1] - baseline_window[0]
+        response_dur = response_window[1] - response_window[0]
+        if baseline_dur <= 0:
+            raise ValueError(f"baseline_window must be a positive-length interval; got {baseline_window}")
+        if response_dur <= 0:
+            raise ValueError(f"response_window must be a positive-length interval; got {response_window}")
+
         session = self.load_session(session_id)
         opto_table = self.get_optotagging_table(session_id)
-        
+
         if len(opto_table) == 0:
             return []
         
@@ -608,15 +617,15 @@ class VBNDataHandler:
                     (unit_spikes >= stim_time + baseline_window[0]) &
                     (unit_spikes < stim_time + baseline_window[1])
                 )
-                baseline_rate = baseline_spikes / (baseline_window[1] - baseline_window[0])
+                baseline_rate = baseline_spikes / baseline_dur
                 baseline_rates.append(baseline_rate)
-                
+
                 # Response spikes
                 response_spikes = np.sum(
                     (unit_spikes >= stim_time + response_window[0]) &
                     (unit_spikes < stim_time + response_window[1])
                 )
-                response_rate = response_spikes / (response_window[1] - response_window[0])
+                response_rate = response_spikes / response_dur
                 response_rates.append(response_rate)
             
             # Check if mean response exceeds threshold
@@ -698,7 +707,7 @@ class VBNDataHandler:
                 print(f"\nNote: {filtered_count} additional sessions exist but were filtered for quality issues")
                 print(f"      (abnormal histology or electrical activity)")
                 print(f"      Total recorded sessions: {len(all_sessions)}")
-        except:
+        except Exception:
             pass
         
         print("\nSessions by image set:")
@@ -849,7 +858,7 @@ class VBNDataHandler:
         # ========== BRAIN AREA COVERAGE ==========
         print("\n--- BRAIN AREA COVERAGE ---")
         unique_areas_per_session = sessions_table['structure_acronyms'].apply(
-            lambda x: len(eval(x)) if isinstance(x, str) else 0
+            lambda x: len(ast.literal_eval(x)) if isinstance(x, str) else 0
         )
         print(f"Average brain areas per session: {unique_areas_per_session.mean():.1f}")
         print(f"Max brain areas in single session: {unique_areas_per_session.max()}")

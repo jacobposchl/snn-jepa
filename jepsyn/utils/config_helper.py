@@ -33,8 +33,15 @@ def verify_config(config_path: Path) -> Dict[str, Any]:
     # Validate required fields
     required_fields = ["data_path", "model_config", "training_config"]
     missing_fields = [field for field in required_fields if field not in config]
-    
+
     if missing_fields:
         raise ValueError(f"Missing required fields in configuration: {', '.join(missing_fields)}")
-    
+
+    # Resolve relative paths relative to the config file's directory so that
+    # the config works correctly regardless of the working directory.
+    config_dir = config_path.resolve().parent
+    for key in ("data_path", "results_out_path", "plots_out_path"):
+        if config.get(key):
+            config[key] = str((config_dir / config[key]).resolve())
+
     return config
