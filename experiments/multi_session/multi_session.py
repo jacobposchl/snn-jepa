@@ -327,7 +327,16 @@ def train_lejepa(
             "val_loss":        val_loss_avg,
         })
 
-        print(f"Epoch {epoch:3d} | train={train_loss_avg:.4f} | val={val_loss_avg:.4f}")
+        avg_pred = train_pred_sum / max(n_train, 1)
+        avg_reg  = train_reg_sum  / max(n_train, 1)
+        w_pred = (1 - lambd) * avg_pred
+        w_reg  = lambd * avg_reg
+        pred_pct = 100 * w_pred / max(train_loss_avg, 1e-9)
+        reg_pct  = 100 * w_reg  / max(train_loss_avg, 1e-9)
+        print(
+            f"Epoch {epoch:3d} | train={train_loss_avg:.4f} | val={val_loss_avg:.4f}"
+            f" | pred={avg_pred:.4f} ({pred_pct:.1f}%) | reg={avg_reg:.4f} ({reg_pct:.1f}%)"
+        )
 
     # ---- Checkpoint ----
     if results_path:

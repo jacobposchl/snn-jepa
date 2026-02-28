@@ -45,8 +45,7 @@ def sigreg(embeddings, global_step, num_slices):
     # Weighted L2 distance
     err = (ecf - exp_f).abs().square().mul(exp_f)
 
-    N = embeddings.size(0) * (dist.get_world_size() if dist.is_initialized() else 1)
-    T = torch.trapezoid(err, t, dim=1) * N
+    T = torch.trapezoid(err, t, dim=1)
 
     return T.mean()
 
