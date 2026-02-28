@@ -43,7 +43,7 @@ model_config:
 
 # Training config
 training_config:
-  epochs: 50
+  epochs: 100
   batch_size: 32
   lr: 1.0e-4
   weight_decay: 0.05
@@ -51,6 +51,6 @@ training_config:
   mask_ratio: 0.5       # fraction of real tokens hidden from context encoder
   lambd: 0.05           # weight of SIGReg term relative to prediction loss
   num_slices: 256       # number of random projections for SIGReg
-  unit_dropout: 0.3     # fraction of units to drop per training step (POYO augmentation)
+  unit_dropout: 0.1     # fraction of units to drop per training step (POYO augmentation)
   unit_id_steps: 200    # steps for test-session unit identification
-  unit_id_lr: 1.0e-3    # learning rate for unit identification
+  unit_id_lr: 1.0e-4    # learning rate for unit identification
