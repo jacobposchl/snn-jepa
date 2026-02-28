@@ -464,26 +464,37 @@ def evaluate_model(model: Any, test_data: Any, stage: str, mask_ratio: float = 0
         all_change = np.concatenate(results_df["is_change"].values)  # [N] bool
         all_block  = np.concatenate(results_df["stim_block"].values) # [N] int
 
-        # Only windows that actually had a stimulus event (stim_block == -1 means none)
+        # Primary probe: is_change among stimulus windows only
         valid = all_block >= 0
-        if valid.sum() >= 10:
+        if valid.sum() >= 10 and len(np.unique(all_change[valid])) >= 2:
             X = StandardScaler().fit_transform(all_h[valid])
             y = all_change[valid].astype(int)
-            n_classes = len(np.unique(y))
-            if n_classes < 2:
+            clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
+            scores = cross_val_score(clf, X, y, cv=5, scoring="balanced_accuracy")
+            print(
+                f"\n[{stage}] Linear probe (is_change) — 5-fold balanced accuracy: "
+                f"{scores.mean():.3f} ± {scores.std():.3f}  (random baseline = 0.500)"
+            )
+        else:
+            # Fallback: stim_block presence (change event vs baseline window).
+            # Triggered when the dataset only attaches stimulus metadata to change events,
+            # making is_change always True for labeled windows. This proxy asks a coarser
+            # but still meaningful question: do representations distinguish change-event
+            # windows from baseline windows?
+            y_fallback = (all_block >= 0).astype(int)
+            if len(np.unique(y_fallback)) >= 2 and y_fallback.sum() >= 10:
+                X = StandardScaler().fit_transform(all_h)
+                clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
+                scores = cross_val_score(clf, X, y_fallback, cv=5, scoring="balanced_accuracy")
                 print(
-                    f"\n[{stage}] Linear probe skipped — only one class present in labeled test windows "
-                    f"(all is_change={bool(y[0])}). Try a different random_state or train/test split."
+                    f"\n[{stage}] Linear probe (change event vs baseline) [fallback] — "
+                    f"5-fold balanced accuracy: {scores.mean():.3f} ± {scores.std():.3f}  "
+                    f"(random baseline = 0.500)\n"
+                    f"  Note: is_change had only 1 class — dataset likely only labels change events.\n"
+                    f"  Fix: ensure non-change trial windows also have stimulus metadata in the parquet."
                 )
             else:
-                clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
-                scores = cross_val_score(clf, X, y, cv=5, scoring="balanced_accuracy")
-                print(
-                    f"\n[{stage}] Linear probe (is_change) — 5-fold balanced accuracy: "
-                    f"{scores.mean():.3f} ± {scores.std():.3f}  (random baseline = 0.500)"
-                )
-        else:
-            print(f"\n[{stage}] Not enough labeled stimulus windows for linear probe ({valid.sum()} found).")
+                print(f"\n[{stage}] Linear probe skipped — insufficient label diversity in test set.")
 
     return results_df
     #when to try implementing RoPE?
