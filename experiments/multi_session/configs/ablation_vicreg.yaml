@@ -1,0 +1,47 @@
+# experiments/multi_session/configs/config_vicreg.yaml
+
+data_path: ../../../datasets/visp_visl_windows.parquet
+results_out_path: ../../../results/ablation_vicreg
+plots_out_path: ../../../plots/ablation_vicreg
+
+data:
+  train_split: 0.7
+  test_split: 0.15
+  val_split: 0.15
+  random_state: 42
+
+model_config:
+  encoder_type: perceiver
+  d_model: 256
+  n_latents: 64
+  window_size_s: 0.4
+  n_cross_attn_heads: 4
+  n_self_attn_layers: 4
+  n_self_attn_heads: 8
+  dim_feedforward: 1024
+  dropout: 0.1
+  # POYO specific settings
+  rope_t_min: 1.0e-3
+  rope_t_max: 4.0
+  use_delimiter_tokens: true
+  # Standard Predictor
+  predictor_type: transformer
+  predictor_n_layers: 2
+  predictor_n_heads: 4
+  predictor_dim_feedforward: 512
+
+training_config:
+  epochs: 100
+  batch_size: 32
+  lr: 1.0e-4
+  weight_decay: 0.05
+  ema_momentum: 0.996
+  mask_ratio: 0.5
+  # --- VICReg Ablation Parameters ---
+  reg_type: "vicreg"
+  vic_sim: 25.0 # Invariance weight
+  vic_std: 25.0 # Variance weight
+  vic_cov: 1.0 # Covariance weight
+  unit_dropout: 0.1
+  unit_id_steps: 200
+  unit_id_lr: 1.0e-4

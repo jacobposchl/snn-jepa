@@ -17,7 +17,8 @@ from torch.utils.data import DataLoader
 from jepsyn.data import REQUIRED_COLUMNS, SpikeWindowDataset, spike_collate_fn
 from jepsyn.losses import lejepa_loss
 from jepsyn.models import NeuralEncoder, NeuralPredictor
-from jepsyn.utils import apply_unit_dropout, create_context_mask, update_ema, verify_config
+from jepsyn.utils import (apply_unit_dropout, create_context_mask, update_ema,
+                          verify_config)
 
 
 def load_and_prepare_data(
@@ -82,7 +83,9 @@ def load_and_prepare_data(
     session_unit_maps: Dict[int, Dict[int, int]] = {}
     for sid, grp in dataset.groupby("session_id"):
         all_units = sorted({int(u) for arr in grp["events_units"] for u in arr})
-        session_unit_maps[int(sid)] = {raw: idx + 1 for idx, raw in enumerate(all_units)}
+        session_unit_maps[int(sid)] = {
+            raw: idx + 1 for idx, raw in enumerate(all_units)
+        }
     print(
         f"Built unit maps for {len(session_unit_maps)} sessions "
         f"(sizes: {[len(m) for m in session_unit_maps.values()]})"
@@ -135,8 +138,13 @@ def load_and_prepare_data(
         collate_fn=spike_collate_fn,
     )
 
-    return train_loader, val_loader, test_loader, session_unit_maps, sorted(test_sessions.tolist())
-
+    return (
+        train_loader,
+        val_loader,
+        test_loader,
+        session_unit_maps,
+        sorted(test_sessions.tolist()),
+    )
 
 
 def train_lejepa(
@@ -176,16 +184,21 @@ def train_lejepa(
     train_cfg = config.get("training_config", {})
 
     # Encoder hyperparameters
-    d_model      = model_cfg.get("d_model", 256)
-    n_latents    = model_cfg.get("n_latents", 64)
+    d_model = model_cfg.get("d_model", 256)
+    n_latents = model_cfg.get("n_latents", 64)
     window_size_s = model_cfg.get("window_size_s", 0.4)
     encoder_type = model_cfg.get("encoder_type", "perceiver")
     encoder_kwargs = {
         k: model_cfg[k]
         for k in (
-            "n_cross_attn_heads", "n_self_attn_layers", "n_self_attn_heads",
-            "dim_feedforward", "dropout",
-            "rope_t_min", "rope_t_max", "use_delimiter_tokens",
+            "n_cross_attn_heads",
+            "n_self_attn_layers",
+            "n_self_attn_heads",
+            "dim_feedforward",
+            "dropout",
+            "rope_t_min",
+            "rope_t_max",
+            "use_delimiter_tokens",
         )
         if k in model_cfg
     }
@@ -201,13 +214,17 @@ def train_lejepa(
         predictor_kwargs["dim_feedforward"] = model_cfg["predictor_dim_feedforward"]
 
     # Training hyperparameters
-    n_epochs     = train_cfg.get("epochs", 100)
-    lr           = train_cfg.get("lr", 1e-4)
+    n_epochs = train_cfg.get("epochs", 100)
+    lr = train_cfg.get("lr", 1e-4)
     weight_decay = train_cfg.get("weight_decay", 0.05)
     ema_momentum = train_cfg.get("ema_momentum", 0.996)
-    mask_ratio   = train_cfg.get("mask_ratio", 0.5)
-    lambd        = train_cfg.get("lambd", 0.05)
-    num_slices   = train_cfg.get("num_slices", 256)
+    mask_ratio = train_cfg.get("mask_ratio", 0.5)
+    lambd = train_cfg.get("lambd", 0.05)
+    num_slices = train_cfg.get("num_slices", 256)
+    reg_type = train_cfg.get("reg_type", "sigreg").lower()
+    vic_sim = train_cfg.get("vic_sim", 25.0)
+    vic_std = train_cfg.get("vic_std", 25.0)
+    vic_cov = train_cfg.get("vic_cov", 1.0)
     unit_dropout = train_cfg.get("unit_dropout", 0.0)
     results_path = config.get("results_out_path")
 
@@ -256,9 +273,9 @@ def train_lejepa(
 
         for batch in train_data:
             session_ids = batch["session_ids"].to(device)
-            unit_ids    = batch["unit_ids"].to(device)
-            time_ids    = batch["time_ids"].to(device)
-            attn_mask   = batch["attention_mask"].to(device)
+            unit_ids = batch["unit_ids"].to(device)
+            time_ids = batch["time_ids"].to(device)
+            attn_mask = batch["attention_mask"].to(device)
 
             # Hide mask_ratio of real tokens from the context encoder.
             ctx_mask = create_context_mask(attn_mask, mask_ratio)
@@ -266,7 +283,9 @@ def train_lejepa(
             # Unit dropout: randomly drop a fraction of units per sample so the
             # model learns to be robust to missing neurons (POYO augmentation).
             if unit_dropout > 0.0:
-                ctx_mask = apply_unit_dropout(unit_ids, ctx_mask, dropout_ratio=unit_dropout)
+                ctx_mask = apply_unit_dropout(
+                    unit_ids, ctx_mask, dropout_ratio=unit_dropout
+                )
 
             # Context encoder: sees only unmasked events, gradients flow.
             Z_ctx, h_ctx = context_encoder(session_ids, unit_ids, time_ids, ctx_mask)
@@ -277,10 +296,19 @@ def train_lejepa(
 
             # Predictor: Z_ctx [B, L, D] → Z_pred [B, L, D].
             Z_pred = predictor(Z_ctx)
-            h_pred = Z_pred.mean(dim=1)   # [B, D]
+            h_pred = Z_pred.mean(dim=1)  # [B, D]
 
             loss, pred_loss, reg_loss = lejepa_loss(
-                h_ctx, h_tgt, h_pred, global_step, lambd, num_slices
+                h_ctx,
+                h_tgt,
+                h_pred,
+                global_step,
+                reg_type,
+                lambd,
+                num_slices,
+                vic_sim,
+                vic_std,
+                vic_cov,
             )
 
             optimizer.zero_grad()
@@ -292,7 +320,7 @@ def train_lejepa(
 
             train_loss_sum += loss.item()
             train_pred_sum += pred_loss.item()
-            train_reg_sum  += reg_loss.item()
+            train_reg_sum += reg_loss.item()
             n_train += 1
             global_step += 1
 
@@ -306,40 +334,53 @@ def train_lejepa(
         with torch.no_grad():
             for batch in val_data:
                 session_ids = batch["session_ids"].to(device)
-                unit_ids    = batch["unit_ids"].to(device)
-                time_ids    = batch["time_ids"].to(device)
-                attn_mask   = batch["attention_mask"].to(device)
+                unit_ids = batch["unit_ids"].to(device)
+                time_ids = batch["time_ids"].to(device)
+                attn_mask = batch["attention_mask"].to(device)
 
                 ctx_mask = create_context_mask(attn_mask, mask_ratio)
-                Z_ctx, h_ctx = context_encoder(session_ids, unit_ids, time_ids, ctx_mask)
+                Z_ctx, h_ctx = context_encoder(
+                    session_ids, unit_ids, time_ids, ctx_mask
+                )
                 _, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
                 Z_pred = predictor(Z_ctx)
-                h_pred = Z_pred.mean(dim=1)   # [B, D]
+                h_pred = Z_pred.mean(dim=1)  # [B, D]
 
                 loss, _, _ = lejepa_loss(
-                    h_ctx, h_tgt, h_pred, global_step, lambd, num_slices
+                    h_ctx,
+                    h_tgt,
+                    h_pred,
+                    global_step,
+                    reg_type,
+                    lambd,
+                    num_slices,
+                    vic_sim,
+                    vic_std,
+                    vic_cov,
                 )
 
                 val_loss_sum += loss.item()
                 n_val += 1
 
         train_loss_avg = train_loss_sum / max(n_train, 1)
-        val_loss_avg   = val_loss_sum   / max(n_val,   1)
+        val_loss_avg = val_loss_sum / max(n_val, 1)
 
-        all_metrics.append({
-            "epoch":           epoch,
-            "train_loss":      train_loss_avg,
-            "train_pred_loss": train_pred_sum / max(n_train, 1),
-            "train_reg_loss":  train_reg_sum  / max(n_train, 1),
-            "val_loss":        val_loss_avg,
-        })
+        all_metrics.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss_avg,
+                "train_pred_loss": train_pred_sum / max(n_train, 1),
+                "train_reg_loss": train_reg_sum / max(n_train, 1),
+                "val_loss": val_loss_avg,
+            }
+        )
 
         avg_pred = train_pred_sum / max(n_train, 1)
-        avg_reg  = train_reg_sum  / max(n_train, 1)
+        avg_reg = train_reg_sum / max(n_train, 1)
         w_pred = (1 - lambd) * avg_pred
-        w_reg  = lambd * avg_reg
+        w_reg = lambd * avg_reg
         pred_pct = 100 * w_pred / max(train_loss_avg, 1e-9)
-        reg_pct  = 100 * w_reg  / max(train_loss_avg, 1e-9)
+        reg_pct = 100 * w_reg / max(train_loss_avg, 1e-9)
         print(
             f"Epoch {epoch:3d} | train={train_loss_avg:.4f} | val={val_loss_avg:.4f}"
             f" | pred={avg_pred:.4f} ({pred_pct:.1f}%) | reg={avg_reg:.4f} ({reg_pct:.1f}%)"
@@ -353,9 +394,9 @@ def train_lejepa(
         torch.save(
             {
                 "context_encoder": context_encoder.state_dict(),
-                "target_encoder":  target_encoder.state_dict(),
-                "predictor":       predictor.state_dict(),
-                "config":          config,
+                "target_encoder": target_encoder.state_dict(),
+                "predictor": predictor.state_dict(),
+                "config": config,
             },
             ckpt_path,
         )
@@ -364,9 +405,214 @@ def train_lejepa(
     return (
         {
             "context_encoder": context_encoder,
-            "target_encoder":  target_encoder,
-            "predictor":       predictor,
+            "target_encoder": target_encoder,
+            "predictor": predictor,
         },
+        pd.DataFrame(all_metrics),
+    )
+
+
+def train_mae(
+    config: Dict[str, Any],
+    train_data: DataLoader,
+    val_data: DataLoader,
+    unit_maps: Dict[int, Dict[int, int]],
+) -> Tuple[Dict[str, Any], pd.DataFrame]:
+    """
+    Train a MAE (Masked Autoencoder) model on multi-session neural data.
+
+    Architecture:
+        encoder  (NeuralEncoder, same as LeJEPA context encoder)
+        decoder  (MAEDecoder: cross-attends over latents to reconstruct masked spike embeddings)
+
+    Loss:
+        MSE reconstruction loss at masked spike token positions only.
+
+    Unlike LeJEPA, there is no EMA target encoder or latent-space predictor.
+    The model learns by reconstructing original spike embeddings at masked positions.
+
+    Args:
+        config     : Validated config dict (from verify_config).
+        train_data : Training DataLoader.
+        val_data   : Validation DataLoader.
+        unit_maps  : {session_id: {raw_unit_id: 1-indexed idx}} from load_and_prepare_data.
+
+    Returns:
+        (model_bundle, metrics_df)
+        model_bundle: {"encoder", "decoder"}
+        metrics_df columns: epoch, train_loss, val_loss
+    """
+    from jepsyn.models import MAEDecoder
+
+    model_cfg = config.get("model_config", {})
+    train_cfg = config.get("training_config", {})
+
+    # Encoder hyperparameters (same as LeJEPA)
+    d_model = model_cfg.get("d_model", 256)
+    n_latents = model_cfg.get("n_latents", 64)
+    window_size_s = model_cfg.get("window_size_s", 0.4)
+    encoder_type = model_cfg.get("encoder_type", "perceiver")
+    encoder_kwargs = {
+        k: model_cfg[k]
+        for k in (
+            "n_cross_attn_heads",
+            "n_self_attn_layers",
+            "n_self_attn_heads",
+            "dim_feedforward",
+            "dropout",
+            "rope_t_min",
+            "rope_t_max",
+            "use_delimiter_tokens",
+        )
+        if k in model_cfg
+    }
+
+    # MAE decoder hyperparameters
+    mae_n_layers      = model_cfg.get("mae_decoder_n_layers", 2)
+    mae_n_heads       = model_cfg.get("mae_decoder_n_heads", 4)
+    mae_dim_ff        = model_cfg.get("mae_decoder_dim_feedforward", 512)
+    mae_dropout       = model_cfg.get("dropout", 0.1)
+
+    # Training hyperparameters
+    n_epochs     = train_cfg.get("epochs", 100)
+    lr           = train_cfg.get("lr", 1e-4)
+    weight_decay = train_cfg.get("weight_decay", 0.05)
+    mask_ratio   = train_cfg.get("mask_ratio", 0.75)
+    unit_dropout = train_cfg.get("unit_dropout", 0.0)
+    results_path = config.get("results_out_path")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Training MAE on {device}")
+
+    # Encoder
+    encoder = NeuralEncoder(
+        session_unit_maps=unit_maps,
+        d_model=d_model,
+        n_latents=n_latents,
+        window_size_s=window_size_s,
+        encoder_type=encoder_type,
+        **encoder_kwargs,
+    ).to(device)
+
+    # MAE Decoder
+    decoder = MAEDecoder(
+        d_model=d_model,
+        n_heads=mae_n_heads,
+        n_layers=mae_n_layers,
+        dim_feedforward=mae_dim_ff,
+        dropout=mae_dropout,
+    ).to(device)
+
+    # Optimizer: both encoder and decoder are trained end-to-end
+    optimizer = torch.optim.AdamW(
+        list(encoder.parameters()) + list(decoder.parameters()),
+        lr=lr,
+        weight_decay=weight_decay,
+    )
+
+    all_metrics = []
+
+    for epoch in range(n_epochs):
+        # ---- Training ----
+        encoder.train()
+        decoder.train()
+        train_loss_sum = 0.0
+        n_train = 0
+
+        for batch in train_data:
+            session_ids = batch["session_ids"].to(device)
+            unit_ids    = batch["unit_ids"].to(device)
+            time_ids    = batch["time_ids"].to(device)
+            attn_mask   = batch["attention_mask"].to(device)
+
+            # Context mask: True = visible to encoder, False = masked
+            ctx_mask = create_context_mask(attn_mask, mask_ratio)
+
+            if unit_dropout > 0.0:
+                ctx_mask = apply_unit_dropout(unit_ids, ctx_mask, dropout_ratio=unit_dropout)
+
+            # Encoder sees only visible (unmasked) tokens
+            Z, _ = encoder(session_ids, unit_ids, time_ids, ctx_mask)
+
+            # Build reconstruction targets: original unit embeddings before masking.
+            # We need the raw unit embeddings — extract them from the encoder directly.
+            with torch.no_grad():
+                x_target = torch.zeros(
+                    session_ids.shape[0], unit_ids.shape[1], d_model,
+                    device=device, dtype=torch.float32,
+                )
+                for sid_val in session_ids.unique():
+                    sid_str = str(sid_val.item())
+                    mask    = (session_ids == sid_val)
+                    x_target[mask] = encoder.encoder.unit_embeds[sid_str](unit_ids[mask])
+
+            # Decoder reconstructs masked positions from latents Z
+            _, loss = decoder(Z, x_target, ctx_mask, attn_mask)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            train_loss_sum += loss.item()
+            n_train += 1
+
+        # ---- Validation ----
+        encoder.eval()
+        decoder.eval()
+        val_loss_sum = 0.0
+        n_val = 0
+
+        with torch.no_grad():
+            for batch in val_data:
+                session_ids = batch["session_ids"].to(device)
+                unit_ids    = batch["unit_ids"].to(device)
+                time_ids    = batch["time_ids"].to(device)
+                attn_mask   = batch["attention_mask"].to(device)
+
+                ctx_mask = create_context_mask(attn_mask, mask_ratio)
+                Z, _     = encoder(session_ids, unit_ids, time_ids, ctx_mask)
+
+                x_target = torch.zeros(
+                    session_ids.shape[0], unit_ids.shape[1], d_model,
+                    device=device, dtype=torch.float32,
+                )
+                for sid_val in session_ids.unique():
+                    sid_str = str(sid_val.item())
+                    mask    = (session_ids == sid_val)
+                    x_target[mask] = encoder.encoder.unit_embeds[sid_str](unit_ids[mask])
+
+                _, loss = decoder(Z, x_target, ctx_mask, attn_mask)
+                val_loss_sum += loss.item()
+                n_val += 1
+
+        train_loss_avg = train_loss_sum / max(n_train, 1)
+        val_loss_avg   = val_loss_sum   / max(n_val,   1)
+
+        all_metrics.append({
+            "epoch":      epoch,
+            "train_loss": train_loss_avg,
+            "val_loss":   val_loss_avg,
+        })
+
+        print(f"Epoch {epoch:3d} | train={train_loss_avg:.4f} | val={val_loss_avg:.4f}")
+
+    # ---- Checkpoint ----
+    if results_path:
+        ckpt_dir  = Path(results_path)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_path = ckpt_dir / "mae_checkpoint.pt"
+        torch.save(
+            {
+                "encoder": encoder.state_dict(),
+                "decoder": decoder.state_dict(),
+                "config":  config,
+            },
+            ckpt_path,
+        )
+        print(f"Checkpoint saved to {ckpt_path}")
+
+    return (
+        {"encoder": encoder, "decoder": decoder},
         pd.DataFrame(all_metrics),
     )
 
@@ -423,17 +669,21 @@ def identify_units(
         config           : Config dict; reads training_config.{unit_id_steps,
                            unit_id_lr, mask_ratio, lambd, num_slices}
     """
-    train_cfg  = config.get("training_config", {})
-    n_steps    = train_cfg.get("unit_id_steps", 200)
-    lr         = train_cfg.get("unit_id_lr", 1e-3)
+    train_cfg = config.get("training_config", {})
+    n_steps = train_cfg.get("unit_id_steps", 200)
+    lr = train_cfg.get("unit_id_lr", 1e-3)
     mask_ratio = train_cfg.get("mask_ratio", 0.5)
-    lambd      = train_cfg.get("lambd", 0.05)
+    reg_type = train_cfg.get("reg_type", "sigreg").lower()
+    lambd = train_cfg.get("lambd", 0.05)
     num_slices = train_cfg.get("num_slices", 256)
+    vic_sim = train_cfg.get("vic_sim", 25.0)
+    vic_std = train_cfg.get("vic_std", 25.0)
+    vic_cov = train_cfg.get("vic_cov", 1.0)
 
-    device          = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     context_encoder = model["context_encoder"].to(device)
-    target_encoder  = model["target_encoder"].to(device)
-    predictor       = model["predictor"].to(device)
+    target_encoder = model["target_encoder"].to(device)
+    predictor = model["predictor"].to(device)
 
     # --- Freeze every parameter in all three modules ---
     for m in (context_encoder, target_encoder, predictor):
@@ -476,15 +726,15 @@ def identify_units(
     target_encoder.eval()
     predictor.eval()
 
-    unit_params   = sum(p.numel() for p in params_to_optimize[:-1])
-    sess_params   = len(test_sess_indices) * context_encoder.encoder.d_model
-    total_params  = unit_params + sess_params
+    unit_params = sum(p.numel() for p in params_to_optimize[:-1])
+    sess_params = len(test_sess_indices) * context_encoder.encoder.d_model
+    total_params = unit_params + sess_params
     print(
         f"\n[Unit ID] Adapting {len(test_session_ids)} test-session unit + session tables "
         f"({total_params:,} params) for {n_steps} steps  lr={lr}"
     )
 
-    step        = 0
+    step = 0
     global_step = 0
 
     while step < n_steps:
@@ -493,31 +743,44 @@ def identify_units(
                 break
 
             session_ids_t = batch["session_ids"].to(device)
-            unit_ids_t    = batch["unit_ids"].to(device)
-            time_ids_t    = batch["time_ids"].to(device)
-            attn_mask     = batch["attention_mask"].to(device)
+            unit_ids_t = batch["unit_ids"].to(device)
+            time_ids_t = batch["time_ids"].to(device)
+            attn_mask = batch["attention_mask"].to(device)
 
             ctx_mask = create_context_mask(attn_mask, mask_ratio)
 
             # Target encoder: always frozen, no gradient needed
             with torch.no_grad():
-                _, h_tgt = target_encoder(session_ids_t, unit_ids_t, time_ids_t, attn_mask)
+                _, h_tgt = target_encoder(
+                    session_ids_t, unit_ids_t, time_ids_t, attn_mask
+                )
 
             # Context encoder: only unit embed params are trainable;
             # gradients flow through frozen cross-attn/self-attn weights back to them.
-            Z_ctx, h_ctx = context_encoder(session_ids_t, unit_ids_t, time_ids_t, ctx_mask)
-            Z_pred       = predictor(Z_ctx)
-            h_pred       = Z_pred.mean(dim=1)
+            Z_ctx, h_ctx = context_encoder(
+                session_ids_t, unit_ids_t, time_ids_t, ctx_mask
+            )
+            Z_pred = predictor(Z_ctx)
+            h_pred = Z_pred.mean(dim=1)
 
             total_loss, pred_loss, _ = lejepa_loss(
-                h_ctx, h_tgt, h_pred, global_step, lambd, num_slices
+                h_ctx,
+                h_tgt,
+                h_pred,
+                global_step,
+                reg_type,
+                lambd,
+                num_slices,
+                vic_sim,
+                vic_std,
+                vic_cov,
             )
 
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
 
-            step        += 1
+            step += 1
             global_step += 1
 
             if step % 50 == 0 or step == n_steps:
@@ -548,7 +811,9 @@ def identify_units(
     print("[Unit ID] Done.\n")
 
 
-def evaluate_model(model: Any, test_data: Any, stage: str, mask_ratio: float = 0.5) -> pd.DataFrame:
+def evaluate_model(
+    model: Any, test_data: Any, stage: str, mask_ratio: float = 0.5
+) -> pd.DataFrame:
     """
     Evaluate a trained model on test data.
 
@@ -568,45 +833,57 @@ def evaluate_model(model: Any, test_data: Any, stage: str, mask_ratio: float = 0
 
     if stage == "LeJEPA":
         context_encoder = model["context_encoder"].to(device).eval()
-        target_encoder  = model["target_encoder"].to(device).eval()
-        predictor       = model["predictor"].to(device).eval()
+        target_encoder = model["target_encoder"].to(device).eval()
+        predictor = model["predictor"].to(device).eval()
     all_metrics = []
 
     with torch.no_grad():
         for batch in test_data:
             session_ids = batch["session_ids"].to(device)
-            unit_ids    = batch["unit_ids"].to(device)
-            time_ids    = batch["time_ids"].to(device)
-            attn_mask   = batch["attention_mask"].to(device)
+            unit_ids = batch["unit_ids"].to(device)
+            time_ids = batch["time_ids"].to(device)
+            attn_mask = batch["attention_mask"].to(device)
 
             if stage == "LeJEPA":
                 # Apply masking to match training conditions — gives an honest pred_loss
                 ctx_mask = create_context_mask(attn_mask, mask_ratio)
-                Z_ctx, h_ctx = context_encoder(session_ids, unit_ids, time_ids, ctx_mask)
-                _,     h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
-                Z_pred       = predictor(Z_ctx)
-                h_pred       = Z_pred.mean(dim=1)   # [B, D]
+                Z_ctx, h_ctx = context_encoder(
+                    session_ids, unit_ids, time_ids, ctx_mask
+                )
+                _, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
+                Z_pred = predictor(Z_ctx)
+                h_pred = Z_pred.mean(dim=1)  # [B, D]
 
-                pred_loss      = torch.nn.functional.mse_loss(h_pred, h_tgt)
-                cos_similarity = torch.nn.functional.cosine_similarity(h_ctx, h_tgt).mean()
+                pred_loss = torch.nn.functional.mse_loss(h_pred, h_tgt)
+                cos_similarity = torch.nn.functional.cosine_similarity(
+                    h_ctx, h_tgt
+                ).mean()
 
                 # Stimulus labels (present only when test_data was built with include_labels=True)
-                labels     = batch.get("labels", [])
-                B          = session_ids.size(0)
-                is_change  = np.array([lb["is_change"]      for lb in labels], dtype=bool) \
-                             if labels else np.zeros(B, dtype=bool)
-                stim_block = np.array([lb["stimulus_block"] for lb in labels], dtype=int) \
-                             if labels else np.full(B, -1, dtype=int)
+                labels = batch.get("labels", [])
+                B = session_ids.size(0)
+                is_change = (
+                    np.array([lb["is_change"] for lb in labels], dtype=bool)
+                    if labels
+                    else np.zeros(B, dtype=bool)
+                )
+                stim_block = (
+                    np.array([lb["stimulus_block"] for lb in labels], dtype=int)
+                    if labels
+                    else np.full(B, -1, dtype=int)
+                )
 
-                all_metrics.append({
-                    "stage":          stage,
-                    "pred_loss":      pred_loss.item(),
-                    "cos_similarity": cos_similarity.item(),
-                    "h_ctx":          h_ctx.cpu().numpy(),
-                    "session_ids":    session_ids.cpu().numpy(),
-                    "is_change":      is_change,
-                    "stim_block":     stim_block,
-                })
+                all_metrics.append(
+                    {
+                        "stage": stage,
+                        "pred_loss": pred_loss.item(),
+                        "cos_similarity": cos_similarity.item(),
+                        "h_ctx": h_ctx.cpu().numpy(),
+                        "session_ids": session_ids.cpu().numpy(),
+                        "is_change": is_change,
+                        "stim_block": stim_block,
+                    }
+                )
 
             # if stage == "SNN": ...
 
@@ -617,20 +894,24 @@ def evaluate_model(model: Any, test_data: Any, stage: str, mask_ratio: float = 0
     # Linear probe: can stimulus/session structure be decoded linearly from frozen representations?
     if stage == "LeJEPA" and "is_change" in results_df.columns:
         from sklearn.linear_model import LogisticRegression
-        from sklearn.model_selection import cross_val_score, StratifiedKFold
-        from sklearn.preprocessing import StandardScaler, LabelEncoder
+        from sklearn.model_selection import StratifiedKFold, cross_val_score
+        from sklearn.preprocessing import LabelEncoder, StandardScaler
 
-        all_h      = np.vstack(results_df["h_ctx"].values)           # [N, D]
+        all_h = np.vstack(results_df["h_ctx"].values)  # [N, D]
         all_change = np.concatenate(results_df["is_change"].values)  # [N] bool
-        all_block  = np.concatenate(results_df["stim_block"].values) # [N] int
-        all_sids   = np.concatenate(results_df["session_ids"].values) # [N] int
+        all_block = np.concatenate(results_df["stim_block"].values)  # [N] int
+        all_sids = np.concatenate(results_df["session_ids"].values)  # [N] int
 
         # Diagnostics: always print so we can see what's in the test set
         valid = all_block >= 0
         print(f"\n[{stage}] Label diagnostics (test set):")
         print(f"  Total windows       : {len(all_change)}")
-        print(f"  stim_block >= 0     : {int(valid.sum())}  (windows with a stimulus event)")
-        print(f"  stim_block == -1    : {int((all_block == -1).sum())}  (baseline / no stimulus event)")
+        print(
+            f"  stim_block >= 0     : {int(valid.sum())}  (windows with a stimulus event)"
+        )
+        print(
+            f"  stim_block == -1    : {int((all_block == -1).sum())}  (baseline / no stimulus event)"
+        )
         print(f"  is_change=True      : {int(all_change.sum())}  (among all windows)")
         print(f"  Unique sessions     : {len(np.unique(all_sids))}")
 
@@ -666,15 +947,18 @@ def evaluate_model(model: Any, test_data: Any, stage: str, mask_ratio: float = 0
         # trained encoder should decode session from the representation far above chance.
         n_sessions = len(np.unique(all_sids))
         if n_sessions >= 2:
-            X     = StandardScaler().fit_transform(all_h)
+            X = StandardScaler().fit_transform(all_h)
             y_sid = LabelEncoder().fit_transform(all_sids)
-            clf   = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced",
-                                       solver="lbfgs")
-            n_folds  = min(5, int(np.bincount(y_sid).min()))   # can't have more folds than min class size
-            n_folds  = max(n_folds, 2)
-            cv       = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
-            scores   = cross_val_score(clf, X, y_sid, cv=cv, scoring="balanced_accuracy")
-            chance   = 1.0 / n_sessions
+            clf = LogisticRegression(
+                max_iter=1000, C=1.0, class_weight="balanced", solver="lbfgs"
+            )
+            n_folds = min(
+                5, int(np.bincount(y_sid).min())
+            )  # can't have more folds than min class size
+            n_folds = max(n_folds, 2)
+            cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+            scores = cross_val_score(clf, X, y_sid, cv=cv, scoring="balanced_accuracy")
+            chance = 1.0 / n_sessions
             print(
                 f"\n[{stage}] Probe 3 — session identity  |  {n_folds}-fold balanced acc: "
                 f"{scores.mean():.3f} ± {scores.std():.3f}  (chance = {chance:.3f})"
@@ -686,7 +970,7 @@ def evaluate_model(model: Any, test_data: Any, stage: str, mask_ratio: float = 0
                 )
 
     return results_df
-    #when to try implementing RoPE?
+    # when to try implementing RoPE?
 
 
 def save_results(
@@ -711,14 +995,16 @@ def save_results(
     if not results_path:
         print("No results_out_path in config; skip saving metrics.")
         return
-    
+
     # create folder (results / LeJEPA /training)
     out_dir = Path(results_path) / stage / phase
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Saving metrics to CSV (drop array columns used only for latent space plot)
     csv_path = out_dir / "metrics.csv"
-    metrics.drop(columns=["h_ctx", "session_ids", "is_change", "stim_block"], errors="ignore").to_csv(csv_path, index=False)
+    metrics.drop(
+        columns=["h_ctx", "session_ids", "is_change", "stim_block"], errors="ignore"
+    ).to_csv(csv_path, index=False)
     print(f"Saved metrics to {csv_path}")
 
     # Generate plots (training curves, latent space, etc.)
@@ -739,16 +1025,18 @@ def save_results(
             axes[0].set_ylabel("Loss")
             axes[0].set_title("Total Loss")
             axes[0].legend()
-        #train_pred_loss here
+        # train_pred_loss here
         # plot pred loss vs reg loss across epochs
         if "train_pred_loss" in metrics.columns:
-            axes[1].plot(metrics["epoch"], metrics["train_pred_loss"], label="pred loss")
+            axes[1].plot(
+                metrics["epoch"], metrics["train_pred_loss"], label="pred loss"
+            )
             axes[1].plot(metrics["epoch"], metrics["train_reg_loss"], label="reg loss")
             axes[1].set_xlabel("Epoch")
             axes[1].set_ylabel("Loss")
             axes[1].set_title("Pred vs Reg Loss")
             axes[1].legend()
-        
+
         # Save figures to output directory
         fig_path = out_dir / "training_curves.png"
         plt.tight_layout()
@@ -757,7 +1045,7 @@ def save_results(
         print(f"Saved training curves to {fig_path}")
 
     elif phase == "test":
-        #test metrics here
+        # test metrics here
         # avg each metric across all test batches for single summary val
         fig, ax = plt.subplots(figsize=(6, 4))
         mean_metrics = metrics[["pred_loss", "cos_similarity"]].mean()
@@ -774,13 +1062,14 @@ def save_results(
         if "h_ctx" in metrics.columns:
             try:
                 import umap
-                #stacks all batches into 1 array [N, D]
+
+                # stacks all batches into 1 array [N, D]
                 latent_vectors = np.vstack(metrics["h_ctx"].values)
                 session_labels = np.concatenate(metrics["session_ids"].values)
-                #reduce to 2D for visualization
+                # reduce to 2D for visualization
                 reducer = umap.UMAP(n_components=2, random_state=42)
                 embeddings2d = reducer.fit_transform(latent_vectors)
-                #scatter plot colored by session id to reveal the learned structure
+                # scatter plot colored by session id to reveal the learned structure
                 fig, ax = plt.subplots(figsize=(8, 6))
                 scatter = ax.scatter(
                     embeddings2d[:, 0],
@@ -802,28 +1091,43 @@ def save_results(
                 # Second UMAP colored by is_change (stimulus windows only)
                 if "is_change" in metrics.columns and "stim_block" in metrics.columns:
                     all_change = np.concatenate(metrics["is_change"].values).astype(int)
-                    all_block  = np.concatenate(metrics["stim_block"].values)
-                    valid      = all_block >= 0
+                    all_block = np.concatenate(metrics["stim_block"].values)
+                    valid = all_block >= 0
                     if valid.sum() >= 10:
                         fig, ax = plt.subplots(figsize=(8, 6))
                         ax.scatter(
-                            embeddings2d[~valid, 0], embeddings2d[~valid, 1],
-                            c="lightgray", alpha=0.2, s=8, label="no stimulus",
+                            embeddings2d[~valid, 0],
+                            embeddings2d[~valid, 1],
+                            c="lightgray",
+                            alpha=0.2,
+                            s=8,
+                            label="no stimulus",
                         )
-                        for val, label, color in [(0, "no change", "steelblue"), (1, "change", "tomato")]:
+                        for val, label, color in [
+                            (0, "no change", "steelblue"),
+                            (1, "change", "tomato"),
+                        ]:
                             mask = valid & (all_change == val)
                             ax.scatter(
-                                embeddings2d[mask, 0], embeddings2d[mask, 1],
-                                c=color, alpha=0.6, s=10, label=label,
+                                embeddings2d[mask, 0],
+                                embeddings2d[mask, 1],
+                                c=color,
+                                alpha=0.6,
+                                s=10,
+                                label=label,
                             )
                         ax.legend()
-                        ax.set_title(f"{stage} - Latent Space by Change Detection (UMAP)")
+                        ax.set_title(
+                            f"{stage} - Latent Space by Change Detection (UMAP)"
+                        )
                         ax.set_xlabel("DIM 1")
                         ax.set_ylabel("DIM 2")
                         plt.tight_layout()
                         plt.savefig(out_dir / "latent_space_change.png")
                         plt.close()
-                        print(f"Saved change UMAP to {out_dir / 'latent_space_change.png'}")
+                        print(
+                            f"Saved change UMAP to {out_dir / 'latent_space_change.png'}"
+                        )
 
             except ImportError:
                 # skip if umap-learn not installed (need to still)
@@ -842,9 +1146,13 @@ def save_results(
             axes[0].set_title("Total Loss")
             axes[0].legend()
         if "distill_loss" in metrics.columns:
-            axes[1].plot(metrics["epoch"], metrics["distill_loss"], label="distill loss")
+            axes[1].plot(
+                metrics["epoch"], metrics["distill_loss"], label="distill loss"
+            )
             if "homeo_loss" in metrics.columns:
-                axes[1].plot(metrics["epoch"], metrics["homeo_loss"], label="homeostatic loss")
+                axes[1].plot(
+                    metrics["epoch"], metrics["homeo_loss"], label="homeostatic loss"
+                )
             axes[1].set_xlabel("Epoch")
             axes[1].set_ylabel("Loss")
             axes[1].set_title("Distill vs Homeostatic Loss")
@@ -870,41 +1178,85 @@ def main(config_path: Path) -> None:
 
     print("\n" + "=" * 60)
     print("Loading and Preparing Data")
-    train_data, val_data, test_data, unit_maps, test_session_ids = load_and_prepare_data(config)
+    train_data, val_data, test_data, unit_maps, test_session_ids = (
+        load_and_prepare_data(config)
+    )
     print("Data loaded successfully")
 
-    print("\n" + "=" * 60)
-    print("Training LeJEPA Teacher Model")
-    jepa_model, jepa_train_metrics = train_lejepa(config, train_data, val_data, unit_maps)
-    save_results(stage="LeJEPA", phase="training", metrics=jepa_train_metrics, config=config)
-    print("LeJEPA training complete")
+    # (for MAE ablation) Confirm which model to run based on reg_type in config 
+    reg_type = config.get("training_config", {}).get("reg_type", "sigreg").lower()
 
-    print("\n" + "=" * 60)
-    print("Unit Identification (adapting test-session unit embeddings)")
-    identify_units(jepa_model, test_data, test_session_ids, config)
-
-    print("\n" + "=" * 60)
-    print("Evaluating LeJEPA on Test Set")
-    _mask_ratio = config.get("training_config", {}).get("mask_ratio", 0.5)
-    jepa_test_metrics = evaluate_model(jepa_model, test_data, stage="LeJEPA", mask_ratio=_mask_ratio)
-    save_results(stage="LeJEPA", phase="test", metrics=jepa_test_metrics, config=config)
-    print("LeJEPA evaluation complete")
-
-    print("\n" + "=" * 60)
-    print("Distilling into Spiking Neural Network")
-    snn_result = distill_snn(config, jepa_model, train_data, val_data)
-    if snn_result is not None:
-        snn_model, snn_train_metrics = snn_result
-        save_results(stage="SNN", phase="distillation", metrics=snn_train_metrics, config=config)
-        print("SNN distillation complete")
+    if reg_type == "none":
+        print("\n" + "=" * 60)
+        print("Training MAE Ablation Model")
+        mae_model, mae_train_metrics = train_mae(
+            config, train_data, val_data, unit_maps
+        )
+        save_results(
+            stage="MAE", phase="training", metrics=mae_train_metrics, config=config
+        )
+        print("MAE training complete")
 
         print("\n" + "=" * 60)
-        print("Evaluating Distilled SNN on Test Set")
-        snn_test_metrics = evaluate_model(snn_model, test_data, stage="SNN")
-        save_results(stage="SNN", phase="test", metrics=snn_test_metrics, config=config)
-        print("SNN evaluation complete")
+        print("Unit Identification (adapting test-session unit embeddings)")
+        identify_units(mae_model, test_data, test_session_ids, config)
+
+        print("\n" + "=" * 60)
+        print("Evaluating MAE on Test Set")
+        _mask_ratio = config.get("training_config", {}).get("mask_ratio", 0.75)
+        mae_test_metrics = evaluate_model(
+            mae_model, test_data, stage="LeJEPA", mask_ratio=_mask_ratio
+        )
+        save_results(stage="MAE", phase="test", metrics=mae_test_metrics, config=config)
+        print("MAE evaluation complete")
+
     else:
-        print("SNN distillation not yet implemented; skipping.")
+        stage_name = "VICReg" if reg_type == "vicreg" else "LeJEPA"
+    
+        print("\n" + "=" * 60)
+        # print("Training LeJEPA Teacher Model")
+        print(f"Training {stage_name} Model")
+        jepa_model, jepa_train_metrics = train_lejepa(
+            config, train_data, val_data, unit_maps
+        )
+        # save_results(stage="LeJEPA", phase="training", metrics=jepa_train_metrics, config=config)
+        save_results(stage=stage_name, phase="training", metrics=jepa_train_metrics, config=config)
+        # print("LeJEPA training complete")
+        print(f"{stage_name} training complete")
+
+        print("\n" + "=" * 60)
+        print("Unit Identification (adapting test-session unit embeddings)")
+        identify_units(jepa_model, test_data, test_session_ids, config)
+
+        print("\n" + "=" * 60)
+        # print("Evaluating LeJEPA on Test Set")
+        print(f"Evaluating {stage_name} on Test Set")
+        _mask_ratio = config.get("training_config", {}).get("mask_ratio", 0.5)
+        jepa_test_metrics = evaluate_model(
+            jepa_model, test_data, stage="LeJEPA", mask_ratio=_mask_ratio
+        )
+        # save_results(stage="LeJEPA", phase="test", metrics=jepa_test_metrics, config=config)
+        save_results(stage=stage_name, phase="test", metrics=jepa_test_metrics, config=config)
+        # print("LeJEPA evaluation complete")
+        print(f"{stage_name} evaluation complete")
+
+        print("\n" + "=" * 60)
+        print("Distilling into Spiking Neural Network")
+        snn_result = distill_snn(config, jepa_model, train_data, val_data)
+        if snn_result is not None:
+            snn_model, snn_train_metrics = snn_result
+            save_results(
+                stage="SNN", phase="distillation", metrics=snn_train_metrics, config=config
+            )
+            print("SNN distillation complete")
+
+            print("\n" + "=" * 60)
+            print("Evaluating Distilled SNN on Test Set")
+            snn_test_metrics = evaluate_model(snn_model, test_data, stage="SNN")
+            save_results(stage="SNN", phase="test", metrics=snn_test_metrics, config=config)
+            print("SNN evaluation complete")
+        else:
+            print("SNN distillation not yet implemented; skipping.")
 
     print("\n" + "=" * 60)
     print("Multi-Session Experiment Complete!")

@@ -1,0 +1,45 @@
+# experiments/multi_session/configs/config_poyo_baseline.yaml
+
+data_path: ../../../datasets/visp_visl_windows.parquet
+results_out_path: ../../../results/ablation_poyo
+plots_out_path: ../../../plots/ablation_poyo
+
+data:
+  train_split: 0.7
+  test_split: 0.15
+  val_split: 0.15
+  random_state: 42
+
+model_config:
+  encoder_type: perceiver
+  d_model: 256
+  n_latents: 64
+  window_size_s: 0.4
+  n_cross_attn_heads: 4
+  n_self_attn_layers: 4
+  n_self_attn_heads: 8
+  dim_feedforward: 1024
+  dropout: 0.1
+  rope_t_min: 1.0e-3
+  rope_t_max: 4.0
+  use_delimiter_tokens: true
+  # --- POYO Baseline Change ---
+  # Making the predictor deep/wide to match the encoder
+  predictor_type: transformer
+  predictor_n_layers: 4
+  predictor_n_heads: 8
+  predictor_dim_feedforward: 1024
+
+training_config:
+  epochs: 100
+  batch_size: 32
+  lr: 1.0e-4
+  weight_decay: 0.05
+  ema_momentum: 0.996
+  # --- SSL Baseline Change ---
+  mask_ratio: 0.75 # Higher masking is standard for POYO-style SSL
+  lambd: 0.01 # Minimize regularization impact to focus on reconstruction
+  num_slices: 256
+  unit_dropout: 0.1
+  unit_id_steps: 200
+  unit_id_lr: 1.0e-4

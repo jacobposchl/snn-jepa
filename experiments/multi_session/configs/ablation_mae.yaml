@@ -1,0 +1,44 @@
+# experiments/multi_session/configs/config_mae.yaml
+
+# MAE ablation: reconstructs masked spike embeddings in input space
+# (while LeJEPA which predicts in latent space)
+data_path: /content/jepsyn/datasets/visp_visl_windows.parquet
+results_out_path: /content/jepsyn/results/ablation_mae
+plots_out_path: /content/jepsyn/plots/ablation_mae
+
+data:
+  train_split: 0.7
+  test_split: 0.15
+  val_split: 0.15
+  random_state: 42
+
+model_config:
+  encoder_type: perceiver
+  d_model: 256
+  n_latents: 64
+  window_size_s: 0.4
+  n_cross_attn_heads: 4
+  n_self_attn_layers: 4
+  n_self_attn_heads: 8
+  dim_feedforward: 1024
+  dropout: 0.1
+  rope_t_min: 1.0e-3
+  rope_t_max: 4.0
+  use_delimiter_tokens: true
+  # MAE decoder settings
+  mae_decoder_n_layers: 2
+  mae_decoder_n_heads: 4
+  mae_decoder_dim_feedforward: 512
+
+training_config:
+  epochs: 100
+  batch_size: 32
+  lr: 1.0e-4
+  weight_decay: 0.05
+  mask_ratio: 0.75  # MAE typically uses higher masking ratio
+  unit_dropout: 0.1
+  unit_id_steps: 200
+  unit_id_lr: 1.0e-4
+  # MAE does not use EMA or SIGReg
+  reg_type: "none"
+  lambd: 0.0
