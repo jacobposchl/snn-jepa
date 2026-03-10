@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 
 from jepsyn.losses import lejepa_loss
 from .training import create_context_mask
+from jepsyn.models.mae_ssl import MAEDecoder
 
 
 def evaluate_model(
@@ -194,6 +195,15 @@ def identify_units(
         config           : Config dict; reads training_config.{unit_id_steps,
                            unit_id_lr, mask_ratio, lambd, num_slices}
     """
+    if "encoder" in model and "context_encoder" not in model:
+        import copy
+        _decoder = model["decoder"]
+        model = {
+            "context_encoder": model["encoder"],
+            "target_encoder":  copy.deepcopy(model["encoder"]),
+            "predictor":       _decoder,
+        }
+
     train_cfg = config.get("training_config", {})
     n_steps = train_cfg.get("unit_id_steps", 200)
     lr = train_cfg.get("unit_id_lr", 1e-3)
@@ -285,7 +295,12 @@ def identify_units(
             Z_ctx, h_ctx = context_encoder(
                 session_ids_t, unit_ids_t, time_ids_t, ctx_mask
             )
-            Z_pred = predictor(Z_ctx)
+            # Z_pred = predictor(Z_ctx)
+            # h_pred = Z_pred.mean(dim=1)
+            if isinstance(predictor, MAEDecoder):
+                Z_pred, _ = predictor(Z_ctx, Z_ctx, ctx_mask, attn_mask)
+            else:
+                Z_pred = predictor(Z_ctx)
             h_pred = Z_pred.mean(dim=1)
 
             total_loss, pred_loss, _ = lejepa_loss(
