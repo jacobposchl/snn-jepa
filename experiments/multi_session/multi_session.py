@@ -398,6 +398,7 @@ def train_lejepa(
                 "target_encoder": target_encoder.state_dict(),
                 "predictor": predictor.state_dict(),
                 "config": config,
+                "unit_maps": unit_maps,
             },
             ckpt_path,
         )
@@ -607,6 +608,7 @@ def train_mae(
                 "encoder": encoder.state_dict(),
                 "decoder": decoder.state_dict(),
                 "config":  config,
+                "unit_maps": unit_maps,
             },
             ckpt_path,
         )
@@ -616,6 +618,129 @@ def train_mae(
         {"encoder": encoder, "decoder": decoder},
         pd.DataFrame(all_metrics),
     )
+
+
+def load_checkpoint(
+    ckpt_path: Path,
+    unit_maps: Dict[int, Dict[int, int]] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[int, Dict[int, int]]]:
+    """
+    Load a saved LeJEPA or MAE checkpoint and reconstruct the model bundle.
+
+    The checkpoint must have been saved by train_lejepa() or train_mae().
+    unit_maps are saved inside the checkpoint (for checkpoints saved after this
+    change); for older checkpoints without unit_maps, pass them explicitly.
+
+    Args:
+        ckpt_path:  Path to the .pt checkpoint file.
+        unit_maps:  {session_id: {raw_unit_id: 1-indexed idx}}.
+                    Only needed for checkpoints that pre-date unit_maps saving.
+                    If the checkpoint contains unit_maps this argument is ignored.
+
+    Returns:
+        (model_bundle, config, unit_maps)
+        model_bundle: JEPA → {"context_encoder", "target_encoder", "predictor"}
+                      MAE  → {"encoder", "decoder"}
+    """
+    from jepsyn.models import MAEDecoder
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ckpt = torch.load(ckpt_path, map_location=device)
+
+    config    = ckpt["config"]
+    unit_maps = ckpt.get("unit_maps", unit_maps)
+    if unit_maps is None:
+        raise ValueError(
+            "unit_maps not found in checkpoint. "
+            "Pass them explicitly via load_checkpoint(ckpt_path, unit_maps=...)."
+        )
+
+    model_cfg = config.get("model_config", {})
+
+    d_model       = model_cfg.get("d_model", 256)
+    n_latents     = model_cfg.get("n_latents", 64)
+    window_size_s = model_cfg.get("window_size_s", 0.4)
+    encoder_type  = model_cfg.get("encoder_type", "perceiver")
+    encoder_kwargs = {
+        k: model_cfg[k]
+        for k in (
+            "n_cross_attn_heads", "n_self_attn_layers", "n_self_attn_heads",
+            "dim_feedforward", "dropout", "rope_t_min", "rope_t_max",
+            "use_delimiter_tokens",
+        )
+        if k in model_cfg
+    }
+
+    is_mae = "encoder" in ckpt and "context_encoder" not in ckpt
+
+    if is_mae:
+        encoder = NeuralEncoder(
+            session_unit_maps=unit_maps,
+            d_model=d_model,
+            n_latents=n_latents,
+            window_size_s=window_size_s,
+            encoder_type=encoder_type,
+            **encoder_kwargs,
+        ).to(device)
+        encoder.load_state_dict(ckpt["encoder"])
+        encoder.eval()
+
+        decoder = MAEDecoder(
+            d_model=d_model,
+            n_heads=model_cfg.get("mae_decoder_n_heads", 4),
+            n_layers=model_cfg.get("mae_decoder_n_layers", 2),
+            dim_feedforward=model_cfg.get("mae_decoder_dim_feedforward", 512),
+            dropout=model_cfg.get("dropout", 0.1),
+        ).to(device)
+        decoder.load_state_dict(ckpt["decoder"])
+        decoder.eval()
+
+        model_bundle = {"encoder": encoder, "decoder": decoder}
+        print(f"Loaded MAE checkpoint from {ckpt_path}")
+
+    else:
+        predictor_type   = model_cfg.get("predictor_type", "transformer")
+        predictor_kwargs: Dict[str, Any] = {}
+        if "predictor_n_layers" in model_cfg:
+            predictor_kwargs["n_layers"] = model_cfg["predictor_n_layers"]
+        if "predictor_n_heads" in model_cfg:
+            predictor_kwargs["n_heads"] = model_cfg["predictor_n_heads"]
+        if "predictor_dim_feedforward" in model_cfg:
+            predictor_kwargs["dim_feedforward"] = model_cfg["predictor_dim_feedforward"]
+
+        context_encoder = NeuralEncoder(
+            session_unit_maps=unit_maps,
+            d_model=d_model,
+            n_latents=n_latents,
+            window_size_s=window_size_s,
+            encoder_type=encoder_type,
+            **encoder_kwargs,
+        ).to(device)
+        context_encoder.load_state_dict(ckpt["context_encoder"])
+        context_encoder.eval()
+
+        target_encoder = copy.deepcopy(context_encoder)
+        target_encoder.load_state_dict(ckpt["target_encoder"])
+        target_encoder.eval()
+        for p in target_encoder.parameters():
+            p.requires_grad_(False)
+
+        predictor = NeuralPredictor(
+            d_model=d_model,
+            predictor_type=predictor_type,
+            **predictor_kwargs,
+        ).to(device)
+        predictor.load_state_dict(ckpt["predictor"])
+        predictor.eval()
+
+        model_bundle = {
+            "context_encoder": context_encoder,
+            "target_encoder":  target_encoder,
+            "predictor":       predictor,
+        }
+        print(f"Loaded LeJEPA checkpoint from {ckpt_path}")
+
+    return model_bundle, config, unit_maps
 
 
 def distill_snn(
