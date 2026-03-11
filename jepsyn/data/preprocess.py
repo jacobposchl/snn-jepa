@@ -23,6 +23,7 @@ Example usage:
         .get())
 """
 
+import re
 import numpy as np
 import pandas as pd
 from typing import Optional, Dict, Any, Tuple
@@ -248,18 +249,22 @@ class NeuropixelsPreprocessor:
         # Apply quality filter first
         filtered_units = units[mask]
         
-        # Brain area filter using metadata table
+        # Brain area filter using metadata table.
+        # Each element of brain_areas is treated as a substring pattern so that
+        # e.g. ["VIS"] matches VISp, VISl, VISrl, VISam, etc.
         area_counts = {}
         if brain_areas is not None and handler is not None:
             metadata_units = handler.units_table
             area_col = 'ecephys_structure_acronym' if 'ecephys_structure_acronym' in metadata_units.columns else 'structure_acronym'
-            
-            # Filter metadata table by brain areas
-            area_filtered = metadata_units[metadata_units[area_col].isin(brain_areas)]
-            
+
+            pattern = "|".join(re.escape(a) for a in brain_areas)
+            area_filtered = metadata_units[
+                metadata_units[area_col].str.contains(pattern, na=False)
+            ]
+
             # Keep only units that are in the filtered metadata
             filtered_units = filtered_units[filtered_units.index.isin(area_filtered.index)]
-            
+
             # Get area counts from metadata table
             area_counts = area_filtered[area_col].value_counts().to_dict()
         

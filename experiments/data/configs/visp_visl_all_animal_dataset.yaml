@@ -9,13 +9,13 @@ dataset_config:
   # Directory where AllenSDK downloads and caches session data.
   cache_dir: ../../../visual_behavior_neuropixels_data/
 
-  # Small set of sessions for testing the pipeline.
-  # You can replace these with any valid ecephys session IDs.
-  session_ids: [1048189115, 1051155866, 1044594870, 1048196054, 1053941483, 1052533639, 1053925378, 1055415082, 1064639378, 1063010385, 1065905010, 1064644573, 1067781390, 1065908084, 1069461581, 1071300149, 1081429294, 1081431006, 1093864136, 1091039376, 1086410738, 1091039902, 1087992708, 1095340643, 1093867806, 1096935816, 1092466205, 1099869737, 1104297538, 1104289498, 1105798776, 1109889304, 1111216934, 1115356973, 1108531612, 1122903357, 1108528422, 1115368723, 1121607504, 1118508667, 1117148442, 1118512505, 1124285719, 1120251466, 1125713722, 1130349290, 1128719842, 1140102579]
+  # session_ids: omit (or set to []) to auto-discover all sessions that have
+  # units matching brain_areas.  Provide an explicit list to override.
+  # session_ids: []
 
-  # Limit to primary visual cortex areas; set to [] or omit
-  # to include all available areas.
-  brain_areas: ["VISp", "VISl"]
+  # Substring filter for brain areas: any structure whose acronym contains one
+  # of these strings is included.
+  brain_areas: ["VIS"]
 
   quality:
     min_snr: 1.0

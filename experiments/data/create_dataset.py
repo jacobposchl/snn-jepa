@@ -42,10 +42,10 @@ def _load_and_validate_config(config_path: Path) -> Dict[str, Any]:
     if not cache_dir:
         raise ValueError("dataset_config.cache_dir is required.")
 
-    session_ids = dataset_cfg.get("session_ids")
-    if not session_ids or not isinstance(session_ids, list):
+    session_ids = dataset_cfg.get("session_ids") or []
+    if session_ids and not isinstance(session_ids, list):
         raise ValueError(
-            "dataset_config.session_ids must be a non-empty list of ecephys session IDs."
+            "dataset_config.session_ids must be a list of ecephys session IDs if provided."
         )
 
     # filter data by provided brain areas, or grab all brain areas
@@ -83,7 +83,7 @@ def _load_and_validate_config(config_path: Path) -> Dict[str, Any]:
     return {
         "data_path": (config_dir / raw["data_path"]).resolve(),
         "cache_dir": (config_dir / cache_dir).resolve(),
-        "session_ids": [int(s) for s in session_ids],
+        "session_ids": [int(s) for s in session_ids],  # empty list = auto-discover
         "brain_areas": brain_areas,
         "quality": {
             "min_snr": min_snr,
@@ -96,6 +96,29 @@ def _load_and_validate_config(config_path: Path) -> Dict[str, Any]:
             "stride_ms": stride_ms,
         },
     }
+
+
+def _discover_sessions(handler: VBNDataHandler, brain_areas: List[str]) -> List[int]:
+    """
+    Auto-discover all ecephys sessions that recorded from areas matching brain_areas.
+
+    Each element of brain_areas is treated as a substring so ["VIS"] matches
+    VISp, VISl, VISrl, VISam, VISpm, etc.
+    """
+    sessions = handler.sessions_table
+
+    def _has_matching_area(areas) -> bool:
+        if isinstance(areas, list):
+            return any(any(p in a for p in brain_areas) for a in areas)
+        if isinstance(areas, str):
+            # column may be stored as a string repr of a list
+            return any(p in areas for p in brain_areas)
+        return False
+
+    mask = sessions["structure_acronyms"].apply(_has_matching_area)
+    ids = list(sessions[mask].index)
+    print(f"Auto-discovered {len(ids)} sessions with areas matching {brain_areas}")
+    return ids
 
 
 def _build_session_windows(
@@ -143,8 +166,20 @@ def _build_session_windows(
 
     stim = session.stimulus_presentations
     active_stim = stim[stim["active"] == True].copy()
-    change_events    = active_stim[active_stim["is_change"] == True].copy()
-    nonchange_events = active_stim[active_stim["is_change"] == False].copy()
+    change_events = active_stim[active_stim["is_change"] == True].copy()
+    # Exclude omission events (no image shown) from non-change windows.
+    # Use the authoritative `omitted` boolean column; fall back to checking
+    # image_name in case the column is absent in an older SDK version.
+    if "omitted" in active_stim.columns:
+        nonchange_events = active_stim[
+            (active_stim["is_change"] == False) & (~active_stim["omitted"])
+        ].copy()
+    else:
+        nonchange_events = active_stim[
+            (active_stim["is_change"] == False)
+            & active_stim["image_name"].notna()
+            & (active_stim["image_name"] != "omitted")
+        ].copy()
 
     if len(change_events) == 0:
         print(f"  No active image-change events in session {session_id}; skipping.")
@@ -152,11 +187,17 @@ def _build_session_windows(
 
     window_size_ms = cfg["windowing"]["window_size_ms"]
 
+    # Restrict spikes to the active change-detection block only (excludes RF
+    # mapping, gray screens, passive replay, etc.)
+    active_start = float(active_stim["start_time"].min())
+    active_end   = float(active_stim["end_time"].max())
+
     # Pool all spikes and unit IDs into sorted arrays for temporaldata
     all_spike_times = []
     all_unit_ids = []
     for unit_id in good_unit_ids:
         spikes = session.spike_times[unit_id]
+        spikes = spikes[(spikes >= active_start) & (spikes <= active_end)]
         all_spike_times.append(spikes)
         all_unit_ids.append(np.full(len(spikes), unit_id, dtype=np.int32))
 
@@ -240,13 +281,21 @@ def main(config_path: Path) -> None:
     out_path: Path = cfg["data_path"]
     parquet_path = out_path.with_suffix(".parquet")
     cache_dir: Path = cfg["cache_dir"]
-    session_ids: List[int] = cfg["session_ids"]
+
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+
+    handler = VBNDataHandler(cache_dir, metadata_only=False)
+
+    # Auto-discover sessions when none are specified in the config
+    session_ids: List[int] = cfg["session_ids"] or _discover_sessions(
+        handler, cfg["brain_areas"] or ["VIS"]
+    )
 
     print("Creating dataset with configuration:")
     print(f"  Output Parquet: {parquet_path}")
     print(f"  Cache dir:  {cache_dir}")
-    print(f"  Sessions:   {session_ids}")
-    print(f"  Brain areas: {cfg['brain_areas'] or 'ALL'}")
+    print(f"  Sessions:   {len(session_ids)} sessions")
+    print(f"  Brain areas: {cfg['brain_areas'] or 'ALL (VIS pattern)'}")
     print(
         f"  Quality: min_snr={cfg['quality']['min_snr']}, "
         f"min_firing_rate={cfg['quality']['min_firing_rate']}, "
@@ -256,10 +305,6 @@ def main(config_path: Path) -> None:
         f"  Windowing: bin_size_ms={cfg['windowing']['bin_size_ms']}, "
         f"window_size_ms={cfg['windowing']['window_size_ms']}"
     )
-
-    parquet_path.parent.mkdir(parents=True, exist_ok=True)
-
-    handler = VBNDataHandler(cache_dir, metadata_only=False)
 
     all_rows: List[Dict[str, Any]] = []
     next_window_id = 0
@@ -274,6 +319,50 @@ def main(config_path: Path) -> None:
         raise RuntimeError("No windows were created; check config and filters.")
 
     df = pd.DataFrame(all_rows)
+
+    # ── Attach session metadata and per-image novelty ────────────────────────
+    # experience_level ('Familiar'/'Novel') and image_set ('G'/'H') come from
+    # the sessions table rather than being stored per-window during extraction,
+    # so we join them in post-processing.
+    sessions_meta = handler.sessions_table
+    if "experience_level" in sessions_meta.columns and "image_set" in sessions_meta.columns:
+        df["experience_level"] = df["session_id"].map(sessions_meta["experience_level"])
+        df["image_set"]        = df["session_id"].map(sessions_meta["image_set"])
+
+        # Flatten the nested stimulus list to get the image_name per row.
+        image_names = df["stimulus"].apply(
+            lambda s: s[0].get("image_name") if s else None
+        )
+
+        # Shared images appear in sessions from BOTH image sets (G ∩ H).
+        # These images are familiar even in a 'Novel' session because the animal
+        # trained on the other set that shares them.
+        combos = pd.DataFrame(
+            {"image_name": image_names, "image_set": df["image_set"]}
+        ).dropna()
+        img_to_sets = combos.groupby("image_name")["image_set"].apply(set)
+        shared_images: set = set(
+            img_to_sets[img_to_sets.apply(lambda s: "G" in s and "H" in s)].index
+        )
+        if shared_images:
+            print(f"\nShared images across G and H (familiar in novel sessions): {sorted(shared_images)}")
+        else:
+            print("\nNo images found in both G and H sets — single-set dataset or sets don't overlap.")
+
+        # image_is_novel: True only when the session is Novel AND the specific
+        # image was not part of the animal's training set (i.e. not shared).
+        df["image_is_novel"] = (df["experience_level"] == "Novel") & (
+            ~image_names.isin(shared_images)
+        )
+        n_novel   = int(df["image_is_novel"].sum())
+        n_familiar = len(df) - n_novel
+        print(f"  image_is_novel: {n_novel} novel-image windows, {n_familiar} familiar-image windows")
+    else:
+        print(
+            "\nWarning: sessions table missing 'experience_level' or 'image_set' columns; "
+            "skipping per-image novelty."
+        )
+
     df.to_parquet(parquet_path, engine="pyarrow", index=False)
 
     print(f"\nWrote {len(df)} windows to {parquet_path}")
