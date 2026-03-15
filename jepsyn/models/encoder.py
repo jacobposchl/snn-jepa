@@ -20,7 +20,8 @@ from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
-from torch_brain.nn import RotaryCrossAttention, RotaryEmbedding, RotarySelfAttention
+from torch_brain.nn import RotaryCrossAttention, RotarySelfAttention
+from torch_brain.nn.rotary_embedding import RotaryEmbedding
 
 
 class _FFN(nn.Module):
