@@ -20,8 +20,33 @@ from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
+from einops import repeat
 from torch_brain.nn import RotaryCrossAttention, RotarySelfAttention
-from torch_brain.nn.rotary_embedding import RotaryEmbedding
+
+
+class RotaryEmbedding(nn.Module):
+    """Rotary positional embedding (copied from torch_brain to avoid version mismatch)."""
+
+    def __init__(self, dim, t_min=1e-4, t_max=4.0):
+        super().__init__()
+        omega = torch.zeros(dim // 2)
+        omega[: dim // 4] = (
+            2
+            * torch.pi
+            / (
+                t_min
+                * (
+                    (t_max / t_min)
+                    ** (torch.arange(0, dim // 2, 2).float() / (dim // 2))
+                )
+            )
+        )
+        self.register_buffer("omega", omega)
+
+    def forward(self, timestamps):
+        angles = torch.einsum("..., f -> ... f", timestamps, self.omega)
+        angles = repeat(angles, "... n -> ... (n r)", r=2)
+        return angles
 
 
 class _FFN(nn.Module):
