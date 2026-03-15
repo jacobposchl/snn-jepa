@@ -1,0 +1,60 @@
+# experiments/multi_session/configs/vicreg_visual_cortex.yaml
+#
+# VICReg variant of the LeJEPA model trained on visual cortex data.
+# All paths are relative to the repo root (snn-jepa/).
+#
+# data_path must point to the Parquet produced by create_dataset.py.
+# Example:
+#   data_path:        ../../../datasets/visp_visl_windows.parquet
+#   results_out_path: ../../../results/vicreg_visual_cortex
+data_path: ../../../datasets/vis_all_animals_dataset.parquet
+results_out_path: ../../../results/vicreg_visual_cortex
+plots_out_path: ../../../plots/vicreg_visual_cortex
+
+# Data split sizes (by session_id)
+data:
+  train_split: 0.7
+  test_split: 0.15
+  val_split: 0.15
+  random_state: 42
+
+# Model config (encoder + predictor share d_model)
+model_config:
+  # --- Encoder ---
+  encoder_type: perceiver
+  d_model: 256           # embedding and latent dimension
+  n_latents: 64          # number of latent slots (L)
+  window_size_s: 0.4     # window duration in seconds; must match windowing.window_size_ms / 1000
+  n_cross_attn_heads: 4
+  n_self_attn_layers: 4
+  n_self_attn_heads: 8
+  dim_feedforward: 1024
+  dropout: 0.1
+
+  # --- POYO RoPE & token settings ---
+  rope_t_min: 1.0e-3     # minimum RoPE period in seconds (1 ms)
+  rope_t_max: 4.0        # maximum RoPE period in seconds (4 s)
+  use_delimiter_tokens: true  # add START/END token per unit per window
+
+  # --- Predictor (intentionally narrower than encoder) ---
+  predictor_type: transformer
+  predictor_n_layers: 2         # encoder has 4
+  predictor_n_heads: 4          # encoder has 8
+  predictor_dim_feedforward: 512  # encoder uses 1024
+
+# Training config
+training_config:
+  epochs: 100
+  batch_size: 32
+  lr: 1.0e-4
+  weight_decay: 0.05
+  ema_momentum: 0.996   # target encoder EMA decay; higher = slower update
+  mask_ratio: 0.5       # fraction of real tokens hidden from context encoder
+  # --- VICReg parameters ---
+  reg_type: "vicreg"
+  vic_sim: 25.0         # weight for invariance (prediction) loss
+  vic_std: 25.0         # weight for variance loss (keeps std > 1 per dim)
+  vic_cov: 1.0          # weight for covariance loss (decorrelates dimensions)
+  unit_dropout: 0.1     # fraction of units to drop per training step (POYO augmentation)
+  unit_id_steps: 200    # steps for test-session unit identification
+  unit_id_lr: 1.0e-4    # learning rate for unit identification
