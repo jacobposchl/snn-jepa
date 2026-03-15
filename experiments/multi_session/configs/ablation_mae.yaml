@@ -2,9 +2,9 @@
 
 # MAE ablation: reconstructs masked spike embeddings in input space
 # (while LeJEPA which predicts in latent space)
-data_path: /content/jepsyn/datasets/visp_visl_windows.parquet
-results_out_path: /content/jepsyn/results/ablation_mae
-plots_out_path: /content/jepsyn/plots/ablation_mae
+data_path: ../../../datasets/vis_all_animals_dataset.parquet
+results_out_path: ../../../results/ablation_mae
+plots_out_path: ../../../plots/ablation_mae
 
 data:
   train_split: 0.7

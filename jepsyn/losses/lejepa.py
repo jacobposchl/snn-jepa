@@ -82,14 +82,14 @@ def lejepa_loss(
     vic_cov=1.0,
 ):
     """
-    LeJEPA loss for masking JEPA on neural data. supports both VICReg and SIGReg regularization.
+    LeJEPA loss for masking JEPA on neural data. supports SIGReg, VICReg, and no-reg.
 
     Args:
         z_context: Mean-pooled context embeddings (masked input), shape (bs, D)
         z_target: Mean-pooled target embeddings (full input, EMA encoder), shape (bs, D)
         z_predicted: Mean-pooled predicted embeddings from predictor(Z_ctx), shape (bs, D)
         global_step: Current training step
-        reg_type: Type of regularization to apply ('sigreg' or 'vicreg')
+        reg_type: Type of regularization to apply ('sigreg', 'vicreg', or 'no_reg')
         lambd: Trade-off between prediction and SIGReg (default 0.05)
         num_slices: Number of projections for SIGReg (default 1024)
         vic_sim: Weight for VICReg similarity loss (default 25.0)
@@ -97,7 +97,7 @@ def lejepa_loss(
         vic_cov: Weight for VICReg covariance loss (default 1.0)
 
     Returns:
-        Tuple of (total_loss, prediction_loss, sigreg_loss) for logging
+        Tuple of (total_loss, prediction_loss, reg_loss) for logging
     """
 
     # Prediction loss between predicted and actual future
@@ -118,10 +118,16 @@ def lejepa_loss(
         reg_loss = (vic_std * std_loss) + (vic_cov * cov_loss)
         total_loss = (vic_sim * prediction_loss) + reg_loss
 
+    elif reg_type == "no_reg":
+        # Raw JEPA prediction loss only — EMA target encoder remains active,
+        # architecture is identical to SIGReg/VICReg, regularizer is zeroed out.
+        reg_loss = torch.zeros(1, device=z_context.device).squeeze()
+        total_loss = prediction_loss
+
     else:
         raise ValueError(
             f"Unknown regularization type: {reg_type}\n"
-            + "expected 'sigreg' or 'vicreg'"
+            + "expected 'sigreg', 'vicreg', or 'no_reg'"
         )
 
     return total_loss, prediction_loss, reg_loss

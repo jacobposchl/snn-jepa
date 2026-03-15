@@ -1,6 +1,6 @@
 # experiments/multi_session/configs/config_vicreg.yaml
 
-data_path: ../../../datasets/visp_visl_windows.parquet
+data_path: ../../../datasets/vis_all_animals_dataset.parquet
 results_out_path: ../../../results/ablation_vicreg
 plots_out_path: ../../../plots/ablation_vicreg
 

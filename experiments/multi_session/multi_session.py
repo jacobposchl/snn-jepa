@@ -7,145 +7,18 @@ a Spiking Neural Network Model
 import argparse
 import copy
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Tuple
 
 import pandas as pd
 import torch
-from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 
-from jepsyn.data import REQUIRED_COLUMNS, SpikeWindowDataset, spike_collate_fn
 from jepsyn.losses import lejepa_loss
 from jepsyn.models import NeuralEncoder, NeuralPredictor
 from jepsyn.utils import (apply_unit_dropout, create_context_mask, evaluate_model,
-                          identify_units, run_linear_probe, save_results, update_ema,
-                          verify_config)
+                          identify_units, load_and_prepare_data, run_linear_probe,
+                          save_results, update_ema, verify_config)
 
-
-def load_and_prepare_data(
-    config: Dict[str, Any],
-) -> Tuple[DataLoader, DataLoader, DataLoader, Dict[int, Dict[int, int]], List[int]]:
-    """
-    Load the spike-window parquet, validate it, split by session, and return DataLoaders.
-
-    Each DataLoader yields batches from spike_collate_fn:
-        session_ids    LongTensor [B]
-        unit_ids       LongTensor [B, max_E]  — 1-indexed contiguous unit idx (0 = PAD)
-        time_ids       LongTensor [B, max_E]  — floor(ms offset), clipped to window
-        attention_mask BoolTensor [B, max_E]  — True = real token, False = padding
-        labels         list[dict]             — test loader only, flattened stimulus fields
-
-    Args:
-        config: Validated configuration dict (from verify_config).
-
-    Returns:
-        (train_loader, val_loader, test_loader, session_unit_maps, test_session_ids)
-        session_unit_maps: {session_id: {raw_unit_id: 1-indexed contiguous idx}}
-            Needed by the training function to size per-session embedding tables.
-    """
-    data_path = config.get("data_path")
-    if not data_path:
-        raise ValueError("data_path not found in configuration")
-
-    dataset = pd.read_parquet(data_path, engine="pyarrow")
-
-    # Column validation
-    missing = [c for c in REQUIRED_COLUMNS if c not in dataset.columns]
-    if missing:
-        raise ValueError(f"Parquet is missing required columns: {missing}")
-
-    print("Validating dataset integrity...")
-
-    # No duplicate window_ids with conflicting timestamps
-    dup = dataset.groupby("window_id").agg(
-        {"window_start_ms": "nunique", "window_end_ms": "nunique"}
-    )
-    conflicts = dup[(dup["window_start_ms"] > 1) | (dup["window_end_ms"] > 1)]
-    if not conflicts.empty:
-        raise ValueError(
-            f"Found {len(conflicts)} window_ids with conflicting timestamps: "
-            f"{conflicts.index.tolist()[:5]}"
-        )
-
-    # events_units and events_times_ms must have equal length per row
-    mismatches = dataset[
-        dataset["events_units"].apply(len) != dataset["events_times_ms"].apply(len)
-    ]
-    if not mismatches.empty:
-        raise ValueError(
-            f"Found {len(mismatches)} rows where events_units and events_times_ms "
-            f"have different lengths (window_ids: {mismatches['window_id'].tolist()[:5]})"
-        )
-
-    print("Passed basic validation checks.")
-
-    # Build per-session unit maps from the full dataset before splitting.
-    # Maps raw AllenSDK unit IDs → 1-indexed contiguous indices; 0 is reserved for PAD.
-    session_unit_maps: Dict[int, Dict[int, int]] = {}
-    for sid, grp in dataset.groupby("session_id"):
-        all_units = sorted({int(u) for arr in grp["events_units"] for u in arr})
-        session_unit_maps[int(sid)] = {
-            raw: idx + 1 for idx, raw in enumerate(all_units)
-        }
-    print(
-        f"Built unit maps for {len(session_unit_maps)} sessions "
-        f"(sizes: {[len(m) for m in session_unit_maps.values()]})"
-    )
-
-    # Session-level train / val / test split
-    data_cfg = config.get("data", {})
-    train_size = data_cfg.get("train_split", 0.7)
-    val_size = data_cfg.get("val_split", 0.15)
-    test_size = data_cfg.get("test_split", 0.15)
-    random_state = data_cfg.get("random_state", 42)
-
-    unique_sessions = dataset["session_id"].unique()
-    train_val_sessions, test_sessions = train_test_split(
-        unique_sessions, test_size=test_size, random_state=random_state
-    )
-    train_sessions, val_sessions = train_test_split(
-        train_val_sessions,
-        test_size=val_size / (train_size + val_size),
-        random_state=random_state,
-    )
-
-    train_df = dataset[dataset["session_id"].isin(train_sessions)]
-    val_df = dataset[dataset["session_id"].isin(val_sessions)]
-    test_df = dataset[dataset["session_id"].isin(test_sessions)]
-
-    print(f"Train: {len(train_df)} windows ({len(train_sessions)} sessions)")
-    print(f"Val:   {len(val_df)} windows ({len(val_sessions)} sessions)")
-    print(f"Test:  {len(test_df)} windows ({len(test_sessions)} sessions)")
-
-    batch_size = config.get("training_config", {}).get("batch_size", 32)
-    has_stimulus = "stimulus" in dataset.columns
-
-    train_loader = DataLoader(
-        SpikeWindowDataset(train_df, session_unit_maps),
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=spike_collate_fn,
-    )
-    val_loader = DataLoader(
-        SpikeWindowDataset(val_df, session_unit_maps),
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=spike_collate_fn,
-    )
-    test_loader = DataLoader(
-        SpikeWindowDataset(test_df, session_unit_maps, include_labels=has_stimulus),
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=spike_collate_fn,
-    )
-
-    return (
-        train_loader,
-        val_loader,
-        test_loader,
-        session_unit_maps,
-        sorted(test_sessions.tolist()),
-    )
 
 
 def train_lejepa(
@@ -822,7 +695,12 @@ def main(config_path: Path) -> None:
         print("Linear probing complete")
 
     else:
-        stage_name = "VICReg" if reg_type == "vicreg" else "LeJEPA"
+        if reg_type == "vicreg":
+            stage_name = "VICReg"
+        elif reg_type == "no_reg":
+            stage_name = "LeJEPA-NoReg"
+        else:
+            stage_name = "LeJEPA"
     
         print("\n" + "=" * 60)
         # print("Training LeJEPA Teacher Model")

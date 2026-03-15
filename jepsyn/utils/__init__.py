@@ -12,6 +12,7 @@ from .config_helper import (
 from .training import (
     apply_unit_dropout,
     create_context_mask,
+    load_and_prepare_data,
     update_ema,
 )
 
