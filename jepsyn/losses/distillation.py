@@ -53,36 +53,60 @@ class CCALoss(nn.Module):
         sigma_hat11 = scale * torch.matmul(H1_c.T, H1_c) + eye
         sigma_hat22 = scale * torch.matmul(H2_c.T, H2_c) + eye
 
-        # 3. Compute CCA via SVD
-        # We need to compute: T = Sigma_11^(-1/2) * Sigma_12 * Sigma_22^(-1/2)
+        # # 3. Compute CCA via SVD
+        # # We need to compute: T = Sigma_11^(-1/2) * Sigma_12 * Sigma_22^(-1/2)
+        #
+        # # Using Cholesky decomposition to find an L such that Sigma = L @ L.T
+        # # this is effecitvely computing the square root of the co-variance Matrices
+        # # if we have nans, add eps
+        # if torch.isnan(sigma_hat11).any():
+        #     sigma_hat11 = torch.eye(self.out_dim, device=H1.device) * eps
+        # if torch.isnan(sigma_hat22).any():
+        #     sigma_hat22 = torch.eye(self.out_dim, device=H2.device) * eps
+        # # and is numerically stable
+        # L1 = torch.linalg.cholesky(sigma_hat11)
+        # L2 = torch.linalg.cholesky(sigma_hat22)
+        #
+        # # Invert L1 and L2 (since they are lower triangular, this is fast/stable)
+        # L1_inv = torch.inverse(L1)
+        # L2_inv = torch.inverse(L2)
+        #
+        # # T = L1_inv.T @ Sigma_12 @ L2_inv
+        # # T represents the cross-covariance between the whitened versions of H1 and H2
+        # # whitening means we can remove auto-correlation and focus
+        # # on the shared structure between H1 and H2
+        # T = torch.matmul(torch.matmul(L1_inv.T, sigma_hat12), L2_inv)
+        #
+        # # 4. Singular Value Decomposition
+        # # The singular values of T are the canonical correlations
+        # # Use simple svd_vals if you don't need eigenvectors
+        # # this set of singular values represents the strength of the correlation
+        # # between the two sets of variables in the latent space where
+        # # 0 means no correlation and 1 means perfect correlation
+        # singular_values = torch.linalg.svdvals(T)
 
-        # Using Cholesky decomposition to find an L such that Sigma = L @ L.T
-        # this is effecitvely computing the square root of the co-variance Matrices
-        # if we have nans, add eps
-        if torch.isnan(sigma_hat11).any():
-            sigma_hat11 = torch.eye(self.out_dim, device=H1.device) * eps
-        if torch.isnan(sigma_hat22).any():
-            sigma_hat22 = torch.eye(self.out_dim, device=H2.device) * eps
-        # and is numerically stable
-        L1 = torch.linalg.cholesky(sigma_hat11)
-        L2 = torch.linalg.cholesky(sigma_hat22)
+        # 3. Compute CCA via Eigendecomposition (The Indestructible Way)
+        # Instead of Cholesky, we find the eigenvalues and force them to be > 0
 
-        # Invert L1 and L2 (since they are lower triangular, this is fast/stable)
-        L1_inv = torch.inverse(L1)
-        L2_inv = torch.inverse(L2)
+        def safe_inverse_sqrt(sigma, eps=1e-3):
+            # Eigendecomposition: Sigma = Q * Lambda * Q^T
+            eigenvalues, eigenvectors = torch.linalg.eigh(sigma)
 
-        # T = L1_inv.T @ Sigma_12 @ L2_inv
-        # T represents the cross-covariance between the whitened versions of H1 and H2
-        # whitening means we can remove auto-correlation and focus
-        # on the shared structure between H1 and H2
-        T = torch.matmul(torch.matmul(L1_inv.T, sigma_hat12), L2_inv)
+            # Clamp eigenvalues so they are at least eps (prevents division by zero)
+            eigenvalues = torch.clamp(eigenvalues, min=eps)
+
+            # Compute Sigma^(-1/2) = Q * Lambda^(-1/2) * Q^T
+            inv_sqrt_lambda = torch.diag(torch.pow(eigenvalues, -0.5))
+            return eigenvectors @ inv_sqrt_lambda @ eigenvectors.T
+
+        # Get the inverse square roots of the auto-covariance matrices
+        sigma_inv_sqrt11 = safe_inverse_sqrt(sigma_hat11, eps=self.eps)
+        sigma_inv_sqrt22 = safe_inverse_sqrt(sigma_hat22, eps=self.eps)
+
+        # T = Sigma11^(-1/2) @ Sigma12 @ Sigma22^(-1/2)
+        T = sigma_inv_sqrt11 @ sigma_hat12 @ sigma_inv_sqrt22
 
         # 4. Singular Value Decomposition
-        # The singular values of T are the canonical correlations
-        # Use simple svd_vals if you don't need eigenvectors
-        # this set of singular values represents the strength of the correlation
-        # between the two sets of variables in the latent space where
-        # 0 means no correlation and 1 means perfect correlation
         singular_values = torch.linalg.svdvals(T)
 
         # 5. Loss = Negative Sum of correlations (maximize correlation)
