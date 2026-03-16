@@ -20,3 +20,4 @@ results/
 # macOS system files
 .DS_Store
 venv/
+*.nvim

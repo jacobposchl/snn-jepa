@@ -10,15 +10,26 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import pandas as pd
+import snn
+import snntorch
 import torch
+from snntorch import surrogate
 from torch.utils.data import DataLoader
 
 from jepsyn.losses import lejepa_loss
+from jepsyn.losses.distillation import DistillationLoss
 from jepsyn.models import NeuralEncoder, NeuralPredictor
-from jepsyn.utils import (apply_unit_dropout, create_context_mask, evaluate_model,
-                          identify_units, load_and_prepare_data, run_linear_probe,
-                          save_results, update_ema, verify_config)
-
+from jepsyn.utils import (
+    apply_unit_dropout,
+    create_context_mask,
+    evaluate_model,
+    identify_units,
+    load_and_prepare_data,
+    run_linear_probe,
+    save_results,
+    update_ema,
+    verify_config,
+)
 
 
 def train_lejepa(
@@ -343,16 +354,16 @@ def train_mae(
     }
 
     # MAE decoder hyperparameters
-    mae_n_layers      = model_cfg.get("mae_decoder_n_layers", 2)
-    mae_n_heads       = model_cfg.get("mae_decoder_n_heads", 4)
-    mae_dim_ff        = model_cfg.get("mae_decoder_dim_feedforward", 512)
-    mae_dropout       = model_cfg.get("dropout", 0.1)
+    mae_n_layers = model_cfg.get("mae_decoder_n_layers", 2)
+    mae_n_heads = model_cfg.get("mae_decoder_n_heads", 4)
+    mae_dim_ff = model_cfg.get("mae_decoder_dim_feedforward", 512)
+    mae_dropout = model_cfg.get("dropout", 0.1)
 
     # Training hyperparameters
-    n_epochs     = train_cfg.get("epochs", 100)
-    lr           = train_cfg.get("lr", 1e-4)
+    n_epochs = train_cfg.get("epochs", 100)
+    lr = train_cfg.get("lr", 1e-4)
     weight_decay = train_cfg.get("weight_decay", 0.05)
-    mask_ratio   = train_cfg.get("mask_ratio", 0.75)
+    mask_ratio = train_cfg.get("mask_ratio", 0.75)
     unit_dropout = train_cfg.get("unit_dropout", 0.0)
     results_path = config.get("results_out_path")
 
@@ -398,15 +409,17 @@ def train_mae(
 
         for batch in train_data:
             session_ids = batch["session_ids"].to(device)
-            unit_ids    = batch["unit_ids"].to(device)
-            time_ids    = batch["time_ids"].to(device)
-            attn_mask   = batch["attention_mask"].to(device)
+            unit_ids = batch["unit_ids"].to(device)
+            time_ids = batch["time_ids"].to(device)
+            attn_mask = batch["attention_mask"].to(device)
 
             # Context mask: True = visible to encoder, False = masked
             ctx_mask = create_context_mask(attn_mask, mask_ratio)
 
             if unit_dropout > 0.0:
-                ctx_mask = apply_unit_dropout(unit_ids, ctx_mask, dropout_ratio=unit_dropout)
+                ctx_mask = apply_unit_dropout(
+                    unit_ids, ctx_mask, dropout_ratio=unit_dropout
+                )
 
             # Encoder sees only visible (unmasked) tokens
             Z, _ = encoder(session_ids, unit_ids, time_ids, ctx_mask)
@@ -415,13 +428,18 @@ def train_mae(
             # We need the raw unit embeddings — extract them from the encoder directly.
             with torch.no_grad():
                 x_target = torch.zeros(
-                    session_ids.shape[0], unit_ids.shape[1], d_model,
-                    device=device, dtype=torch.float32,
+                    session_ids.shape[0],
+                    unit_ids.shape[1],
+                    d_model,
+                    device=device,
+                    dtype=torch.float32,
                 )
                 for sid_val in session_ids.unique():
                     sid_str = str(sid_val.item())
-                    mask    = (session_ids == sid_val)
-                    x_target[mask] = encoder.encoder.unit_embeds[sid_str](unit_ids[mask])
+                    mask = session_ids == sid_val
+                    x_target[mask] = encoder.encoder.unit_embeds[sid_str](
+                        unit_ids[mask]
+                    )
 
             # Decoder reconstructs masked positions from latents Z
             _, loss = decoder(Z, x_target, ctx_mask, attn_mask)
@@ -442,47 +460,54 @@ def train_mae(
         with torch.no_grad():
             for batch in val_data:
                 session_ids = batch["session_ids"].to(device)
-                unit_ids    = batch["unit_ids"].to(device)
-                time_ids    = batch["time_ids"].to(device)
-                attn_mask   = batch["attention_mask"].to(device)
+                unit_ids = batch["unit_ids"].to(device)
+                time_ids = batch["time_ids"].to(device)
+                attn_mask = batch["attention_mask"].to(device)
 
                 ctx_mask = create_context_mask(attn_mask, mask_ratio)
-                Z, _     = encoder(session_ids, unit_ids, time_ids, ctx_mask)
+                Z, _ = encoder(session_ids, unit_ids, time_ids, ctx_mask)
 
                 x_target = torch.zeros(
-                    session_ids.shape[0], unit_ids.shape[1], d_model,
-                    device=device, dtype=torch.float32,
+                    session_ids.shape[0],
+                    unit_ids.shape[1],
+                    d_model,
+                    device=device,
+                    dtype=torch.float32,
                 )
                 for sid_val in session_ids.unique():
                     sid_str = str(sid_val.item())
-                    mask    = (session_ids == sid_val)
-                    x_target[mask] = encoder.encoder.unit_embeds[sid_str](unit_ids[mask])
+                    mask = session_ids == sid_val
+                    x_target[mask] = encoder.encoder.unit_embeds[sid_str](
+                        unit_ids[mask]
+                    )
 
                 _, loss = decoder(Z, x_target, ctx_mask, attn_mask)
                 val_loss_sum += loss.item()
                 n_val += 1
 
         train_loss_avg = train_loss_sum / max(n_train, 1)
-        val_loss_avg   = val_loss_sum   / max(n_val,   1)
+        val_loss_avg = val_loss_sum / max(n_val, 1)
 
-        all_metrics.append({
-            "epoch":      epoch,
-            "train_loss": train_loss_avg,
-            "val_loss":   val_loss_avg,
-        })
+        all_metrics.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss_avg,
+                "val_loss": val_loss_avg,
+            }
+        )
 
         print(f"Epoch {epoch:3d} | train={train_loss_avg:.4f} | val={val_loss_avg:.4f}")
 
     # ---- Checkpoint ----
     if results_path:
-        ckpt_dir  = Path(results_path)
+        ckpt_dir = Path(results_path)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         ckpt_path = ckpt_dir / "mae_checkpoint.pt"
         torch.save(
             {
                 "encoder": encoder.state_dict(),
                 "decoder": decoder.state_dict(),
-                "config":  config,
+                "config": config,
                 "unit_maps": unit_maps,
             },
             ckpt_path,
@@ -522,7 +547,7 @@ def load_checkpoint(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(ckpt_path, map_location=device)
 
-    config    = ckpt["config"]
+    config = ckpt["config"]
     unit_maps = ckpt.get("unit_maps", unit_maps)
     if unit_maps is None:
         raise ValueError(
@@ -532,15 +557,20 @@ def load_checkpoint(
 
     model_cfg = config.get("model_config", {})
 
-    d_model       = model_cfg.get("d_model", 256)
-    n_latents     = model_cfg.get("n_latents", 64)
+    d_model = model_cfg.get("d_model", 256)
+    n_latents = model_cfg.get("n_latents", 64)
     window_size_s = model_cfg.get("window_size_s", 0.4)
-    encoder_type  = model_cfg.get("encoder_type", "perceiver")
+    encoder_type = model_cfg.get("encoder_type", "perceiver")
     encoder_kwargs = {
         k: model_cfg[k]
         for k in (
-            "n_cross_attn_heads", "n_self_attn_layers", "n_self_attn_heads",
-            "dim_feedforward", "dropout", "rope_t_min", "rope_t_max",
+            "n_cross_attn_heads",
+            "n_self_attn_layers",
+            "n_self_attn_heads",
+            "dim_feedforward",
+            "dropout",
+            "rope_t_min",
+            "rope_t_max",
             "use_delimiter_tokens",
         )
         if k in model_cfg
@@ -574,7 +604,7 @@ def load_checkpoint(
         print(f"Loaded MAE checkpoint from {ckpt_path}")
 
     else:
-        predictor_type   = model_cfg.get("predictor_type", "transformer")
+        predictor_type = model_cfg.get("predictor_type", "transformer")
         predictor_kwargs: Dict[str, Any] = {}
         if "predictor_n_layers" in model_cfg:
             predictor_kwargs["n_layers"] = model_cfg["predictor_n_layers"]
@@ -610,8 +640,8 @@ def load_checkpoint(
 
         model_bundle = {
             "context_encoder": context_encoder,
-            "target_encoder":  target_encoder,
-            "predictor":       predictor,
+            "target_encoder": target_encoder,
+            "predictor": predictor,
         }
         print(f"Loaded LeJEPA checkpoint from {ckpt_path}")
 
@@ -639,8 +669,63 @@ def distill_snn(
     # - Distillation training loop with validation
     # - Save checkpoints
     # - Return trained SNN and metrics
-    pass
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    d_model = config["model_config"]["d_model"]
 
+    # 1. Initialize SNN Student
+    # We use the same d_model to ensure the latent dimensions match the Teacher
+    net = torch.nn.Sequential(
+        torch.nn.Linear(d_model, d_model * 2),
+        snn.Leaky(beta=0.9, spike_grad=surrogate.fast_sigmoid(), init_hidden=True),
+        torch.nn.Linear(d_model * 2, d_model),
+        snn.Leaky(
+            beta=0.9, spike_grad=surrogate.fast_sigmoid(), init_hidden=True, output=True
+        ),
+    ).to(device)
+
+    # 2. Setup Specialized Distillation Loss
+    dist_loss_fn = DistillationLoss(
+        latent_dim=d_model,
+        cca_weight=1.0,  # High weight on manifold alignment
+        homeostatic_weight=0.01,  # Keep firing rates in biological range
+    )
+
+    optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+    teacher_model["context_encoder"].eval()
+
+    metrics_log = []
+
+    # 3. Distillation Loop (Short 5-10 epoch run for the deadline)
+    for epoch in range(10):
+        total_cca_sim = 0
+        for batch in train_data:
+            with torch.no_grad():
+                z_teacher, _ = teacher_model["context_encoder"](
+                    batch["session_ids"].to(device),
+                    batch["unit_ids"].to(device),
+                    batch["time_ids"].to(device),
+                    batch["attention_mask"].to(device),
+                )
+
+            # SNN Forward Pass
+            spk, mem = net(z_teacher)
+
+            # Flatten for CCA: (Batch, Time, Dim) -> (Batch*Time, Dim)
+            loss, metrics = dist_loss_fn(
+                mem.view(-1, d_model), z_teacher.view(-1, d_model)
+            )
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_cca_sim += metrics["cca_similarity"]
+
+        avg_sim = total_cca_sim / len(train_data)
+        print(f"Epoch {epoch} | CCA Similarity: {avg_sim:.4f}")
+        metrics_log.append({"epoch": epoch, "cca_similarity": avg_sim})
+
+    return net, pd.DataFrame(metrics_log)
 
 
 def main(config_path: Path) -> None:
@@ -662,7 +747,7 @@ def main(config_path: Path) -> None:
     )
     print("Data loaded successfully")
 
-    # (for MAE ablation) Confirm which model to run based on reg_type in config 
+    # (for MAE ablation) Confirm which model to run based on reg_type in config
     reg_type = config.get("training_config", {}).get("reg_type", "sigreg").lower()
 
     if reg_type == "none":
@@ -701,7 +786,7 @@ def main(config_path: Path) -> None:
             stage_name = "LeJEPA-NoReg"
         else:
             stage_name = "LeJEPA"
-    
+
         print("\n" + "=" * 60)
         # print("Training LeJEPA Teacher Model")
         print(f"Training {stage_name} Model")
@@ -709,7 +794,12 @@ def main(config_path: Path) -> None:
             config, train_data, val_data, unit_maps
         )
         # save_results(stage="LeJEPA", phase="training", metrics=jepa_train_metrics, config=config)
-        save_results(stage=stage_name, phase="training", metrics=jepa_train_metrics, config=config)
+        save_results(
+            stage=stage_name,
+            phase="training",
+            metrics=jepa_train_metrics,
+            config=config,
+        )
         # print("LeJEPA training complete")
         print(f"{stage_name} training complete")
 
@@ -725,7 +815,9 @@ def main(config_path: Path) -> None:
             jepa_model, test_data, stage=stage_name, mask_ratio=_mask_ratio
         )
         # save_results(stage="LeJEPA", phase="test", metrics=jepa_test_metrics, config=config)
-        save_results(stage=stage_name, phase="test", metrics=jepa_test_metrics, config=config)
+        save_results(
+            stage=stage_name, phase="test", metrics=jepa_test_metrics, config=config
+        )
         print(f"{stage_name} evaluation complete")
 
         print("\n" + "=" * 60)
@@ -739,14 +831,19 @@ def main(config_path: Path) -> None:
         if snn_result is not None:
             snn_model, snn_train_metrics = snn_result
             save_results(
-                stage="SNN", phase="distillation", metrics=snn_train_metrics, config=config
+                stage="SNN",
+                phase="distillation",
+                metrics=snn_train_metrics,
+                config=config,
             )
             print("SNN distillation complete")
 
             print("\n" + "=" * 60)
             print("Evaluating Distilled SNN on Test Set")
             snn_test_metrics = evaluate_model(snn_model, test_data, stage="SNN")
-            save_results(stage="SNN", phase="test", metrics=snn_test_metrics, config=config)
+            save_results(
+                stage="SNN", phase="test", metrics=snn_test_metrics, config=config
+            )
             print("SNN evaluation complete")
         else:
             print("SNN distillation not yet implemented; skipping.")
@@ -754,6 +851,7 @@ def main(config_path: Path) -> None:
     print("\n" + "=" * 60)
     print("Multi-Session Experiment Complete!")
     print("=" * 60)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
