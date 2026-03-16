@@ -113,6 +113,7 @@ def train_lejepa(
     results_path = config.get("results_out_path")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    is_cuda = device.type == "cuda"
     print(f"Training on {device}")
 
     # Context encoder: online network, gradients flow through this.
@@ -136,6 +137,14 @@ def train_lejepa(
         predictor_type=predictor_type,
         **predictor_kwargs,
     ).to(device)
+
+    # Compile encoder and predictor for fused kernels (PyTorch 2.0+).
+    # dynamic=True handles variable sequence lengths from delimiter injection.
+    if is_cuda and hasattr(torch, "compile"):
+        print("Compiling encoder and predictor with torch.compile...")
+        context_encoder = torch.compile(context_encoder, dynamic=True)
+        target_encoder  = torch.compile(target_encoder,  dynamic=True)
+        predictor       = torch.compile(predictor,       dynamic=True)
 
     # Optimizer: context encoder + predictor only.
     optimizer = torch.optim.AdamW(
@@ -171,29 +180,30 @@ def train_lejepa(
                     unit_ids, ctx_mask, dropout_ratio=unit_dropout
                 )
 
-            # Context encoder: sees only unmasked events, gradients flow.
-            Z_ctx, h_ctx = context_encoder(session_ids, unit_ids, time_ids, ctx_mask)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=is_cuda):
+                # Context encoder: sees only unmasked events, gradients flow.
+                Z_ctx, h_ctx = context_encoder(session_ids, unit_ids, time_ids, ctx_mask)
 
-            # Target encoder: sees all events, EMA weights, no gradients.
-            with torch.no_grad():
-                _, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
+                # Target encoder: sees all events, EMA weights, no gradients.
+                with torch.no_grad():
+                    _, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
 
-            # Predictor: Z_ctx [B, L, D] → Z_pred [B, L, D].
-            Z_pred = predictor(Z_ctx)
-            h_pred = Z_pred.mean(dim=1)  # [B, D]
+                # Predictor: Z_ctx [B, L, D] → Z_pred [B, L, D].
+                Z_pred = predictor(Z_ctx)
+                h_pred = Z_pred.mean(dim=1)  # [B, D]
 
-            loss, pred_loss, reg_loss = lejepa_loss(
-                h_ctx,
-                h_tgt,
-                h_pred,
-                global_step,
-                reg_type,
-                lambd,
-                num_slices,
-                vic_sim,
-                vic_std,
-                vic_cov,
-            )
+                loss, pred_loss, reg_loss = lejepa_loss(
+                    h_ctx,
+                    h_tgt,
+                    h_pred,
+                    global_step,
+                    reg_type,
+                    lambd,
+                    num_slices,
+                    vic_sim,
+                    vic_std,
+                    vic_cov,
+                )
 
             optimizer.zero_grad()
             loss.backward()
@@ -223,25 +233,27 @@ def train_lejepa(
                 attn_mask = batch["attention_mask"].to(device)
 
                 ctx_mask = create_context_mask(attn_mask, mask_ratio)
-                Z_ctx, h_ctx = context_encoder(
-                    session_ids, unit_ids, time_ids, ctx_mask
-                )
-                _, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
-                Z_pred = predictor(Z_ctx)
-                h_pred = Z_pred.mean(dim=1)  # [B, D]
 
-                loss, _, _ = lejepa_loss(
-                    h_ctx,
-                    h_tgt,
-                    h_pred,
-                    global_step,
-                    reg_type,
-                    lambd,
-                    num_slices,
-                    vic_sim,
-                    vic_std,
-                    vic_cov,
-                )
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=is_cuda):
+                    Z_ctx, h_ctx = context_encoder(
+                        session_ids, unit_ids, time_ids, ctx_mask
+                    )
+                    _, h_tgt = target_encoder(session_ids, unit_ids, time_ids, attn_mask)
+                    Z_pred = predictor(Z_ctx)
+                    h_pred = Z_pred.mean(dim=1)  # [B, D]
+
+                    loss, _, _ = lejepa_loss(
+                        h_ctx,
+                        h_tgt,
+                        h_pred,
+                        global_step,
+                        reg_type,
+                        lambd,
+                        num_slices,
+                        vic_sim,
+                        vic_std,
+                        vic_cov,
+                    )
 
                 val_loss_sum += loss.item()
                 n_val += 1

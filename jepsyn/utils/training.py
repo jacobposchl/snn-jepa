@@ -210,18 +210,27 @@ def load_and_prepare_data(
         batch_size=batch_size,
         shuffle=True,
         collate_fn=spike_collate_fn,
+        num_workers=2,
+        pin_memory=True,
+        persistent_workers=True,
     )
     val_loader = DataLoader(
         SpikeWindowDataset(val_df, session_unit_maps),
         batch_size=batch_size,
         shuffle=False,
         collate_fn=spike_collate_fn,
+        num_workers=2,
+        pin_memory=True,
+        persistent_workers=True,
     )
     test_loader = DataLoader(
         SpikeWindowDataset(test_df, session_unit_maps, include_labels=has_stimulus),
         batch_size=batch_size,
         shuffle=False,
         collate_fn=spike_collate_fn,
+        num_workers=2,
+        pin_memory=True,
+        persistent_workers=True,
     )
 
     return (
