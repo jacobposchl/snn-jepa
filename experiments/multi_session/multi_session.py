@@ -12,7 +12,7 @@ from typing import Any, Dict, Tuple
 import pandas as pd
 import snntorch
 import torch
-from snntorch import surrogate
+from snntorch import surrogate, utils
 from torch.utils.data import DataLoader
 
 from jepsyn.losses import lejepa_loss
@@ -697,6 +697,7 @@ def distill_snn(
     for epoch in range(10):
         total_cca_sim = 0
         for batch in train_data:
+            utils.reset(net)
             with torch.no_grad():
                 z_teacher, _ = teacher_model["context_encoder"](
                     batch["session_ids"].to(device),
