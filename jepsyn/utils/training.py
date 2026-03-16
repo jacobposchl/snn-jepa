@@ -204,7 +204,7 @@ def load_and_prepare_data(
         batch_size=batch_size,
         shuffle=False,
         collate_fn=spike_collate_fn,
-        num_workers=4,
+        num_workers=2,
         pin_memory=True,
         persistent_workers=True,
     )
