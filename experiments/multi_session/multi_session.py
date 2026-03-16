@@ -138,14 +138,6 @@ def train_lejepa(
         **predictor_kwargs,
     ).to(device)
 
-    # Compile encoder and predictor for fused kernels (PyTorch 2.0+).
-    # dynamic=True handles variable sequence lengths from delimiter injection.
-    if is_cuda and hasattr(torch, "compile"):
-        print("Compiling encoder and predictor with torch.compile...")
-        context_encoder = torch.compile(context_encoder, dynamic=True)
-        target_encoder  = torch.compile(target_encoder,  dynamic=True)
-        predictor       = torch.compile(predictor,       dynamic=True)
-
     # Optimizer: context encoder + predictor only.
     optimizer = torch.optim.AdamW(
         list(context_encoder.parameters()) + list(predictor.parameters()),
