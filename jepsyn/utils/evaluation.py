@@ -80,12 +80,17 @@ def _run_probes(
         n_cls   = len(le.classes_)
         X       = StandardScaler().fit_transform(X_img)
         clf     = LogisticRegression(
-            max_iter=5000, C=1.0, class_weight="balanced", solver="saga",
+            max_iter=1000, C=1.0, class_weight="balanced", solver="lbfgs",
+            multi_class="auto",
         )
         n_folds = max(2, min(5, int(np.bincount(y_img).min())))
         cv      = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
-        bal_acc = cross_val_score(clf, X, y_img, cv=cv, scoring="balanced_accuracy")
         proba   = cross_val_predict(clf, X, y_img, cv=cv, method="predict_proba")
+        from sklearn.metrics import balanced_accuracy_score
+        bal_acc = np.array([
+            balanced_accuracy_score(y_img[val_idx], proba[val_idx].argmax(axis=1))
+            for _, val_idx in cv.split(X, y_img)
+        ])
         auroc   = roc_auc_score(y_img, proba, multi_class="ovr", average="macro")
         chance  = 1.0 / n_cls
         results["image_name"] = {
