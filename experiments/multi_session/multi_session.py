@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import pandas as pd
-import snn
 import snntorch
 import torch
 from snntorch import surrogate
@@ -676,9 +675,9 @@ def distill_snn(
     # We use the same d_model to ensure the latent dimensions match the Teacher
     net = torch.nn.Sequential(
         torch.nn.Linear(d_model, d_model * 2),
-        snn.Leaky(beta=0.9, spike_grad=surrogate.fast_sigmoid(), init_hidden=True),
+        snntorch.Leaky(beta=0.9, spike_grad=surrogate.fast_sigmoid(), init_hidden=True),
         torch.nn.Linear(d_model * 2, d_model),
-        snn.Leaky(
+        snntorch.Leaky(
             beta=0.9, spike_grad=surrogate.fast_sigmoid(), init_hidden=True, output=True
         ),
     ).to(device)
