@@ -1,12 +1,12 @@
-# experiments/multi_session/configs/ablation_vicreg.yaml
-#
-# VICReg ablation: identical to lejepa_visual_cortex.yaml in every way except
-# the regularizer (reg_type: vicreg + vic_* weights).
-# All paths are relative to the repo root (snn-jepa/).
+
+# JEPA-NoReg: identical to lejepa_visual_cortex.yaml in every way except
+# the regularizer is zeroed out (reg_type: no_reg, lambd: 0.0).
+# The EMA target encoder remains active — this is not MAE; it is the same
+# JEPA architecture with the regularization term removed.
 
 data_path: ../../../datasets/vis_all_animals_dataset.parquet
-results_out_path: ../../../results/ablation_vicreg
-plots_out_path: ../../../plots/ablation_vicreg
+results_out_path: ../../../results/ablation_no_reg
+plots_out_path: ../../../plots/ablation_no_reg
 
 # Data split sizes (by session_id)
 data:
@@ -39,7 +39,7 @@ model_config:
   predictor_n_heads: 4
   predictor_dim_feedforward: 512
 
-# Training config (identical to lejepa_visual_cortex.yaml except reg_type and vic_* params)
+# Training config (identical to lejepa_visual_cortex.yaml except reg_type and lambd)
 training_config:
   epochs: 100
   batch_size: 32
@@ -47,10 +47,8 @@ training_config:
   weight_decay: 0.05
   ema_momentum: 0.996
   mask_ratio: 0.5
-  reg_type: "vicreg"
-  vic_sim: 25.0         # weight for invariance (prediction) loss
-  vic_std: 25.0         # weight for variance loss (keeps std > 1 per dim)
-  vic_cov: 1.0          # weight for covariance loss (decorrelates dimensions)
+  reg_type: "no_reg"
+  lambd: 0.0
   unit_dropout: 0.4
   unit_id_steps: 200
   unit_id_lr: 1.0e-4
