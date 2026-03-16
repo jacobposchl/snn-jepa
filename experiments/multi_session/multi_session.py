@@ -556,28 +556,28 @@ def main(config_path: Path) -> None:
     run_linear_probe(jepa_model, test_data, stage=stage_name)
     print("Linear probing complete")
 
-        print("\n" + "=" * 60)
-        print("Distilling into Spiking Neural Network")
-        snn_result = distill_snn(config, jepa_model, train_data, val_data)
-        if snn_result is not None:
-            snn_model, snn_train_metrics = snn_result
-            save_results(
-                stage="SNN",
-                phase="distillation",
-                metrics=snn_train_metrics,
-                config=config,
-            )
-            print("SNN distillation complete")
+    print("\n" + "=" * 60)
+    print("Distilling into Spiking Neural Network")
+    snn_result = distill_snn(config, jepa_model, train_data, val_data)
+    if snn_result is not None:
+        snn_model, snn_train_metrics = snn_result
+        save_results(
+            stage="SNN",
+            phase="distillation",
+            metrics=snn_train_metrics,
+            config=config,
+        )
+        print("SNN distillation complete")
 
-            print("\n" + "=" * 60)
-            print("Evaluating Distilled SNN on Test Set")
-            snn_test_metrics = evaluate_model(snn_model, test_data, stage="SNN")
-            save_results(
-                stage="SNN", phase="test", metrics=snn_test_metrics, config=config
-            )
-            print("SNN evaluation complete")
-        else:
-            print("SNN distillation not yet implemented; skipping.")
+        print("\n" + "=" * 60)
+        print("Evaluating Distilled SNN on Test Set")
+        snn_test_metrics = evaluate_model(snn_model, test_data, stage="SNN")
+        save_results(
+            stage="SNN", phase="test", metrics=snn_test_metrics, config=config
+        )
+        print("SNN evaluation complete")
+    else:
+        print("SNN distillation not yet implemented; skipping.")
 
     print("\n" + "=" * 60)
     print("Multi-Session Experiment Complete!")
