@@ -18,7 +18,7 @@ class CCALoss(nn.Module):
     Minimizes -1 * sum(correlations)
     """
 
-    def __init__(self, out_dim: int, eps: float = 1e-4):
+    def __init__(self, out_dim: int, eps: float = 1e-3):
         """
         out_dim: Dimensionality of the latent space (should match SNN and JEPA)
         eps: Small regularization term to ensure numerical stability when inverting covariance matrices
@@ -58,6 +58,11 @@ class CCALoss(nn.Module):
 
         # Using Cholesky decomposition to find an L such that Sigma = L @ L.T
         # this is effecitvely computing the square root of the co-variance Matrices
+        # if we have nans, add eps
+        if torch.isnan(sigma_hat11).any():
+            sigma_hat11 = torch.eye(self.out_dim, device=H1.device) * eps
+        if torch.isnan(sigma_hat22).any():
+            sigma_hat22 = torch.eye(self.out_dim, device=H2.device) * eps
         # and is numerically stable
         L1 = torch.linalg.cholesky(sigma_hat11)
         L2 = torch.linalg.cholesky(sigma_hat22)
