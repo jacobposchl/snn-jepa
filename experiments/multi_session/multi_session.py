@@ -694,7 +694,6 @@ def distill_snn(
 
     metrics_log = []
 
-    # 3. Distillation Loop (Short 5-10 epoch run for the deadline)
     for epoch in range(10):
         total_cca_sim = 0
         for batch in train_data:
@@ -706,12 +705,21 @@ def distill_snn(
                     batch["attention_mask"].to(device),
                 )
 
-            # SNN Forward Pass
-            spk, mem = net(z_teacher)
+            outputs = net(z_teacher)
+            spk, mem = outputs[0], outputs[1]
 
-            # Flatten for CCA: (Batch, Time, Dim) -> (Batch*Time, Dim)
+            # Calculate simple Homeostatic Penalty
+            # Target 10% activity to mirror biological cortical sparse coding
+            firing_rate = spk.mean() 
+            homeo_penalty = torch.pow(firing_rate - 0.1, 2)
+
+            # Loss calculation
+            # Note: we use 'mem' (membrane potential) because it is a continuous 
+            # signal that maps better to the Teacher's latent manifold than discrete spikes.
             loss, metrics = dist_loss_fn(
-                mem.view(-1, d_model), z_teacher.view(-1, d_model)
+                mem.view(-1, d_model), 
+                z_teacher.view(-1, d_model),
+                homeostatic_penalty=homeo_penalty
             )
 
             optimizer.zero_grad()
