@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import json; nb=json.load\\(open\\(''experiments/multi_session/multi_session_runner.ipynb''\\)\\); cells=nb[''cells'']; [print\\(f''Cell {i}: id={c.get\\(\"\"id\"\",\"\"?\"\"\\)} outputs={len\\(c.get\\(\"\"outputs\"\",[]\\)\\)}''\\) for i,c in enumerate\\(cells\\)]\")",
+      "Bash(python -c \"import json; nb=json.load\\(open\\(''experiments/multi_session/multi_session_runner.ipynb'', encoding=''utf-8''\\)\\); cells=nb[''cells'']; [print\\(f''Cell {i}: id={c.get\\(\"\"id\"\",\"\"?\"\"\\)} nout={len\\(c.get\\(\"\"outputs\"\",[]\\)\\)}''\\) for i,c in enumerate\\(cells\\)]\")",
+      "Bash(python -c \":*)"
+    ]
+  }
+}

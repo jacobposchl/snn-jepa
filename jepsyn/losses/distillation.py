@@ -90,7 +90,15 @@ class CCALoss(nn.Module):
 
         def safe_inverse_sqrt(sigma, eps=1e-3):
             # Eigendecomposition: Sigma = Q * Lambda * Q^T
-            eigenvalues, eigenvectors = torch.linalg.eigh(sigma)
+            try:
+                eigenvalues, eigenvectors = torch.linalg.eigh(sigma)
+            except torch.linalg.LinAlgError:
+                # eigh fails on ill-conditioned matrices with many repeated eigenvalues
+                # (e.g. collapsed representations where sigma ≈ eps * I).
+                # In that case the inverse sqrt is analytically (1/√eps) * I.
+                return (eps ** -0.5) * torch.eye(
+                    sigma.shape[0], device=sigma.device, dtype=sigma.dtype
+                )
 
             # Clamp eigenvalues so they are at least eps (prevents division by zero)
             eigenvalues = torch.clamp(eigenvalues, min=eps)
